@@ -10,6 +10,13 @@
 pythonw .\Translator.pyw
 ```
 
+也可以直接双击已打包的 `dist\Translator.exe`。如需重新构建，请先安装 `PyInstaller`，然后运行：
+
+```powershell
+python -m pip install PyInstaller
+.\build_exe.ps1
+```
+
 桌面版使用 Windows 自带的 `Tkinter` UI，不需要 Electron、WebView 或第三方包。窗口默认并始终置顶；左上角图钉用于固定弹窗位置：未固定时，划词窗口跟随鼠标出现；固定后，每次都在记录的位置出现，拖动窗口还会自动更新该位置。图钉状态和坐标会与热键一起持久化。应用还支持粘贴翻译、语言交换、`Ctrl+Enter` 翻译和结果复制。
 
 默认划词热键为 `Alt+W`：

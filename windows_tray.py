@@ -7,6 +7,7 @@ import ctypes.wintypes as wintypes
 import os
 import queue
 import threading
+from pathlib import Path
 
 
 WM_DESTROY = 0x0002
@@ -32,6 +33,9 @@ TPM_RETURNCMD = 0x0100
 TPM_NONOTIFY = 0x0080
 
 IDI_APPLICATION = 32512
+IMAGE_ICON = 1
+LR_LOADFROMFILE = 0x0010
+LR_DEFAULTSIZE = 0x0040
 TRAY_ICON_ID = 1
 MENU_SHOW = 1001
 MENU_SETTINGS = 1002
@@ -168,8 +172,14 @@ def running_tray_icon_rect() -> tuple[int, int, int, int] | None:
 class SystemTray:
     """Own a Shell_NotifyIcon icon on a dedicated Win32 message-loop thread."""
 
-    def __init__(self, events: queue.Queue[str]) -> None:
+    def __init__(
+        self,
+        events: queue.Queue[str],
+        *,
+        icon_path: str | os.PathLike[str] | None = None,
+    ) -> None:
         self.events = events
+        self.icon_path = str(Path(icon_path).resolve()) if icon_path else None
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
         self._hwnd: int | None = None
@@ -180,6 +190,8 @@ class SystemTray:
         self._hinstance: int | None = None
         self._nid: NOTIFYICONDATAW | None = None
         self._taskbar_created = 0
+        self._hicon: int | None = None
+        self._owns_icon = False
 
     @property
     def is_running(self) -> bool:
@@ -256,6 +268,17 @@ class SystemTray:
         user32.UnregisterClassW.restype = wintypes.BOOL
         user32.LoadIconW.argtypes = (wintypes.HINSTANCE, ctypes.c_void_p)
         user32.LoadIconW.restype = wintypes.HICON
+        user32.LoadImageW.argtypes = (
+            wintypes.HINSTANCE,
+            wintypes.LPCWSTR,
+            wintypes.UINT,
+            ctypes.c_int,
+            ctypes.c_int,
+            wintypes.UINT,
+        )
+        user32.LoadImageW.restype = wintypes.HANDLE
+        user32.DestroyIcon.argtypes = (wintypes.HICON,)
+        user32.DestroyIcon.restype = wintypes.BOOL
         user32.GetMessageW.argtypes = (
             ctypes.POINTER(MSG),
             wintypes.HWND,
@@ -324,17 +347,41 @@ class SystemTray:
         finally:
             if shell32 is not None:
                 self._remove_icon(shell32)
+            if user32 is not None and self._owns_icon and self._hicon:
+                user32.DestroyIcon(self._hicon)
             if user32 is not None and self._hwnd:
                 user32.DestroyWindow(self._hwnd)
             if user32 is not None and self._hinstance:
                 user32.UnregisterClassW(self._class_name, self._hinstance)
             self._hwnd = None
             self._icon_added = False
+            self._hicon = None
+            self._owns_icon = False
+
+    def _load_icon(self, user32: ctypes.WinDLL) -> int:
+        if self._hicon:
+            return self._hicon
+        if self.icon_path:
+            loaded = user32.LoadImageW(
+                None,
+                self.icon_path,
+                IMAGE_ICON,
+                0,
+                0,
+                LR_LOADFROMFILE | LR_DEFAULTSIZE,
+            )
+            if loaded:
+                self._hicon = int(loaded)
+                self._owns_icon = True
+                return self._hicon
+        self._hicon = int(user32.LoadIconW(None, ctypes.c_void_p(IDI_APPLICATION)))
+        self._owns_icon = False
+        return self._hicon
 
     def _add_icon(self, user32: ctypes.WinDLL, shell32: ctypes.WinDLL) -> bool:
         if not self._hwnd:
             return False
-        icon = user32.LoadIconW(None, ctypes.c_void_p(IDI_APPLICATION))
+        icon = self._load_icon(user32)
         self._nid = NOTIFYICONDATAW(
             cbSize=ctypes.sizeof(NOTIFYICONDATAW),
             hWnd=self._hwnd,

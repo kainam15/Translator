@@ -7,6 +7,7 @@ import ctypes
 import json
 import os
 import queue
+import sys
 import threading
 import time
 import tkinter as tk
@@ -72,6 +73,13 @@ HOTKEY_FALLBACKS = (
     HotkeySpec(("Alt", "Shift"), "W"),
     HotkeySpec(("Ctrl", "Alt"), "T"),
 )
+
+
+def resource_path(relative_path: str) -> Path:
+    """Resolve a project asset both from source and a PyInstaller bundle."""
+    source_root = Path(__file__).resolve().parent
+    bundle_root = Path(getattr(sys, "_MEIPASS", source_root))
+    return bundle_root / relative_path
 
 
 @dataclass(frozen=True)
@@ -404,10 +412,11 @@ class TranslatorApp:
         self.hotkey_spec = settings.hotkey
         self._position_pinned = settings.position_pinned
         self._fixed_position = settings.window_position
+        self._icon_path = resource_path("assets/translator_icon.ico")
         self._hotkey_events: queue.Queue[str] = queue.Queue()
         self._hotkey_manager = GlobalHotkey(self._hotkey_events)
         self._tray_events: queue.Queue[str] = queue.Queue()
-        self._tray = SystemTray(self._tray_events)
+        self._tray = SystemTray(self._tray_events, icon_path=self._icon_path)
         self._settings_dialog: HotkeySettingsDialog | None = None
         self._results: queue.Queue[tuple[int, TranslationResult | None, str | None]] = (
             queue.Queue()
@@ -426,6 +435,11 @@ class TranslatorApp:
 
     def _configure_window(self) -> None:
         self.root.title("Translator")
+        if self._icon_path.is_file():
+            try:
+                self.root.iconbitmap(default=str(self._icon_path))
+            except tk.TclError:
+                pass
         self.root.overrideredirect(not self._decorated)
         self.root.configure(bg=COLORS["border"])
         self.root.attributes("-topmost", True)
