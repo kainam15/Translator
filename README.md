@@ -27,7 +27,7 @@ python -m pip install PyInstaller
 
 如果 `Alt+W` 已被其他程序占用，应用会自动尝试 `Alt+Shift+W`，再尝试 `Ctrl+Alt+T`；当前生效组合会显示在窗口底部。
 
-点击窗口右上角“设置”可以录制新快捷键。设置保存在 `%APPDATA%\TranslatorLite\settings.json`。`Esc`、标题栏 `×` 和系统关闭按钮都只隐藏窗口，程序会继续驻留在 Windows 系统托盘并等待热键。左键单击托盘图标可恢复窗口；只有在托盘图标上右键选择“退出”，程序才会真正结束。
+点击窗口右上角“设置”可以录制新快捷键。设置保存在 `%APPDATA%\TranslatorLite\settings.json`。点击窗口外、按 `Esc`、点击标题栏 `×` 或系统关闭按钮都只隐藏窗口，程序会继续驻留在 Windows 系统托盘并等待热键。左键单击托盘图标可恢复窗口；只有在托盘图标上右键选择“退出”，程序才会真正结束。
 
 划词实现参考 [pot-desktop](https://github.com/pot-app/pot-desktop) 的 Windows 两级策略：先尝试 UI Automation，再使用剪贴板回退。回退路径会把选中文本复制到剪贴板；无论通过哪种方式读取，文本都会发送给 Google Translate。请勿对密码、token 或其他敏感文本使用该快捷键。
 
