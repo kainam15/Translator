@@ -3,6 +3,21 @@
 
 RESIZE_EDGES = frozenset(("n", "ne", "e", "se", "s", "sw", "w", "nw"))
 
+#: ``tk scaling`` at 96 DPI, the density this UI's pixel constants are drawn for.
+BASELINE_TK_SCALING = 96.0 / 72.0
+
+
+def scale_for_dpi(value: int, scaling: float) -> int:
+    """Convert a 96-DPI design pixel into a physical pixel for this display.
+
+    Tk sizes fonts in points and multiplies them by ``tk scaling``, but a window
+    geometry is raw pixels. Without this the two drift apart on a high-DPI
+    screen: the text grows while the window it lives in does not.
+    """
+    if scaling <= 0:
+        return value
+    return max(1, round(value * scaling / BASELINE_TK_SCALING))
+
 
 def clamp_window_position(
     x: int,

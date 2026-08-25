@@ -27,8 +27,22 @@ from ..windows.mouse import GlobalMouseClick, window_at_point_is_current_process
 from ..windows.selection import get_selected_text_by_automation
 from ..windows.tray import SystemTray
 from ..windows.window import redraw_window, set_window_bounds, set_window_position
-from .placement import clamp_window_position, resize_window_geometry
+from .placement import clamp_window_position, resize_window_geometry, scale_for_dpi
 from .settings import AppSettings, load_settings, save_settings
+from .theme import (
+    COLORS,
+    COMBOBOX_STYLE,
+    FONTS,
+    ICON_FONT,
+    KEYCAP_FONT,
+    MARQUEE_SPAN,
+    advance_marquee,
+    configure_ttk_styles,
+    flat_button,
+    restyle_button,
+    scrolling_text,
+    separator,
+)
 
 
 @dataclass(frozen=True)
@@ -51,24 +65,9 @@ SOURCE_LANGUAGES = (
 )
 TARGET_LANGUAGES = SOURCE_LANGUAGES[1:]
 
-COLORS = {
-    "border": "#D9D9DD",
-    "window": "#F3F3F4",
-    "card": "#FFFFFF",
-    "input": "#F7F7F8",
-    "provider": "#E4E4E6",
-    "text": "#151518",
-    "muted": "#6F7077",
-    "faint": "#A3A4AA",
-    "blue": "#2563EB",
-    "blue_hover": "#1D4ED8",
-    "blue_soft": "#E7EEFF",
-    "purple": "#7C3AED",
-    "danger": "#B42318",
-}
-
-FONT = "Microsoft YaHei UI"
 PLACEHOLDER = "输入要翻译的文本…"
+MAX_TEXT_LENGTH = 5_000
+COUNTER_WARNING_AT = 4_500
 HOTKEY_FALLBACKS = (
     HotkeySpec(("Alt", "Shift"), "W"),
     HotkeySpec(("Ctrl", "Alt"), "T"),
@@ -80,6 +79,20 @@ def resource_path(relative_path: str) -> Path:
     source_root = Path(__file__).resolve().parents[1]
     bundle_root = Path(getattr(sys, "_MEIPASS", source_root))
     return bundle_root / relative_path
+
+
+def scaled_pixels(widget: tk.Misc, value: int) -> int:
+    """Turn a 96-DPI design pixel into a physical pixel for a widget's display.
+
+    Tk sizes fonts in points and scales them with the display, but geometry is
+    raw pixels; anything measured in pixels has to be converted or it drifts out
+    of proportion with its own text.
+    """
+    try:
+        scaling = float(widget.tk.call("tk", "scaling"))
+    except (tk.TclError, ValueError):
+        return value
+    return scale_for_dpi(value, scaling)
 
 
 def enable_dpi_awareness() -> None:
@@ -111,20 +124,22 @@ class HotkeySettingsDialog:
 
         self.window = tk.Toplevel(app.root)
         self.window.title("热键设置")
-        self.window.configure(bg=COLORS["window"])
+        self.window.configure(bg=COLORS["raised"])
         self.window.resizable(False, False)
         self.window.attributes("-topmost", True)
         self.window.protocol("WM_DELETE_WINDOW", self.cancel)
         self.window.bind("<KeyPress>", self._on_key_press)
 
-        width = 600
+        width = scaled_pixels(app.root, 480)
         app.root.update_idletasks()
         self._build()
 
         # Font metrics grow with Windows DPI scaling. Size the client area from
         # its real requested height so the bottom action row cannot be clipped.
+        # The floor only guards against a collapsed layout; it must stay under
+        # the natural content height or it pads the dialog with dead space.
         self.window.update_idletasks()
-        height = max(300, self.window.winfo_reqheight() + 4)
+        height = max(scaled_pixels(app.root, 120), self.window.winfo_reqheight() + 4)
         x = app.root.winfo_x() + max(0, (app.root.winfo_width() - width) // 2)
         y = app.root.winfo_y() + max(0, (app.root.winfo_height() - height) // 2)
         root_center_x = app.root.winfo_x() + app.root.winfo_width() // 2
@@ -143,116 +158,92 @@ class HotkeySettingsDialog:
         tk.Label(
             self.window,
             text="热键设置",
-            bg=COLORS["window"],
+            bg=COLORS["raised"],
             fg=COLORS["text"],
-            font=(FONT, 16, "bold"),
-        ).pack(anchor="w", padx=20, pady=(17, 11))
+            font=FONTS["heading"],
+        ).pack(anchor="w", padx=20, pady=(18, 12))
 
-        row = tk.Frame(
-            self.window,
-            bg=COLORS["input"],
-            highlightthickness=1,
-            highlightbackground=COLORS["border"],
-        )
+        row = tk.Frame(self.window, bg=COLORS["sunken"])
         row.pack(fill="x", padx=20)
 
         tk.Label(
             row,
             text="划词翻译",
-            bg=COLORS["input"],
+            bg=COLORS["sunken"],
             fg=COLORS["text"],
-            font=(FONT, 12, "bold"),
-        ).pack(side="left", padx=18, pady=24)
+            font=FONTS["label"],
+        ).pack(side="left", padx=16, pady=22)
 
         recorder = tk.Frame(
             row,
-            bg=COLORS["card"],
+            bg=COLORS["surface"],
             highlightthickness=1,
-            highlightbackground="#B8B8BD",
+            highlightbackground=COLORS["line_strong"],
         )
-        recorder.pack(side="right", fill="x", expand=True, padx=14, pady=12)
+        recorder.pack(side="right", fill="x", expand=True, padx=12, pady=12)
 
-        labels = tk.Frame(recorder, bg=COLORS["card"])
-        labels.pack(side="left", fill="both", expand=True, padx=13, pady=7)
+        labels = tk.Frame(recorder, bg=COLORS["surface"])
+        labels.pack(side="left", fill="both", expand=True, padx=12, pady=7)
         self.instruction = tk.Label(
             labels,
             text="点击录制，然后按下新快捷键",
-            bg=COLORS["card"],
+            bg=COLORS["surface"],
             fg=COLORS["muted"],
-            font=(FONT, 8),
+            font=FONTS["caption"],
             anchor="w",
         )
         self.instruction.pack(fill="x")
         self.hotkey_label = tk.Label(
             labels,
             text=self.candidate.display,
-            bg=COLORS["card"],
+            bg=COLORS["surface"],
             fg=COLORS["text"],
-            font=("Segoe UI", 13),
+            font=KEYCAP_FONT,
             anchor="w",
         )
         self.hotkey_label.pack(fill="x")
 
-        self.record_button = tk.Button(
+        self.record_button = flat_button(
             recorder,
-            text="录制",
-            command=self.begin_recording,
-            bd=0,
-            relief="flat",
-            bg="#D7D7DA",
-            activebackground="#C9C9CD",
-            fg=COLORS["text"],
-            padx=15,
+            "录制",
+            self.begin_recording,
+            kind="quiet",
+            bg=COLORS["surface"],
+            padx=14,
             pady=8,
-            cursor="hand2",
-            font=(FONT, 9, "bold"),
         )
-        self.record_button.pack(side="right", padx=9, pady=9)
+        self.record_button.pack(side="right", padx=8, pady=8)
 
         self.error_label = tk.Label(
             self.window,
             text="划词内容会复制到剪贴板，并发送给 Google Translate。",
-            bg=COLORS["window"],
+            bg=COLORS["raised"],
             fg=COLORS["muted"],
-            font=(FONT, 8),
+            font=FONTS["caption"],
             anchor="w",
+            wraplength=scaled_pixels(self.window, 430),
+            justify="left",
         )
-        self.error_label.pack(fill="x", padx=22, pady=(9, 0))
+        self.error_label.pack(fill="x", padx=21, pady=(10, 0))
 
-        actions = tk.Frame(self.window, bg=COLORS["window"])
+        actions = tk.Frame(self.window, bg=COLORS["raised"])
         actions.pack(side="bottom", fill="x", padx=20, pady=15)
-        tk.Button(
-            actions,
-            text="确定",
-            command=self.confirm,
-            bd=0,
-            relief="flat",
-            bg=COLORS["blue"],
-            fg="#FFFFFF",
-            activebackground=COLORS["blue_hover"],
-            cursor="hand2",
-            padx=18,
-            pady=7,
-            font=(FONT, 8, "bold"),
+        flat_button(
+            actions, "确定", self.confirm, kind="primary", padx=18, pady=7
         ).pack(side="right")
-        tk.Button(
+        flat_button(
             actions,
-            text="取消",
-            command=self.cancel,
-            bd=0,
-            relief="flat",
-            bg=COLORS["window"],
-            fg=COLORS["muted"],
-            activebackground="#E7E7E9",
-            cursor="hand2",
-            padx=13,
+            "取消",
+            self.cancel,
+            kind="ghost",
+            bg=COLORS["raised"],
+            padx=14,
             pady=7,
-            font=(FONT, 8),
-        ).pack(side="right", padx=(0, 7))
+        ).pack(side="right", padx=(0, 8))
 
     def begin_recording(self) -> None:
         self.recording = True
-        self.instruction.configure(text="请按下组合键…", fg=COLORS["blue"])
+        self.instruction.configure(text="请按下组合键…", fg=COLORS["accent"])
         self.hotkey_label.configure(text="等待按键")
         self.record_button.configure(text="录制中…", state="disabled")
         self.error_label.configure(text="至少包含 Ctrl、Alt、Shift 之一。", fg=COLORS["muted"])
@@ -314,12 +305,13 @@ class HotkeySettingsDialog:
 
 
 class TranslatorApp:
-    WIDTH = 720
-    HEIGHT = 660
-    MIN_WIDTH = 440
-    MIN_HEIGHT = 500
+    WIDTH = 560
+    HEIGHT = 540
+    MIN_WIDTH = 400
+    MIN_HEIGHT = 420
     RESIZE_BORDER = 6
     RESIZE_CORNER = 8
+    PROGRESS_INTERVAL_MS = 16
 
     def __init__(self, root: tk.Tk, *, decorated: bool = False) -> None:
         self.root = root
@@ -336,6 +328,8 @@ class TranslatorApp:
         self._capture_pending = False
         self._clipboard_sequence = 0
         self._clipboard_deadline = 0.0
+        self._progress_offset = -MARQUEE_SPAN
+        self._progress_running = False
         settings = load_settings()
         self.hotkey_spec = settings.hotkey
         self._position_pinned = settings.position_pinned
@@ -366,6 +360,9 @@ class TranslatorApp:
         self._poll_tray_events()
         self._poll_mouse_events()
 
+    def _scale(self, value: int) -> int:
+        return scaled_pixels(self.root, value)
+
     def _configure_window(self) -> None:
         self.root.title("Translator")
         if self._icon_path.is_file():
@@ -374,13 +371,19 @@ class TranslatorApp:
             except tk.TclError:
                 pass
         self.root.overrideredirect(not self._decorated)
-        self.root.configure(bg=COLORS["border"])
+        self.root.configure(bg=COLORS["line_strong"])
         self.root.attributes("-topmost", True)
+
+        # Shadow the class-level design pixels with physical ones so every
+        # later geometry check (minimum size, resize clamping) speaks the same
+        # units as the window itself.
+        self.MIN_WIDTH = self._scale(TranslatorApp.MIN_WIDTH)
+        self.MIN_HEIGHT = self._scale(TranslatorApp.MIN_HEIGHT)
         self.root.minsize(self.MIN_WIDTH, self.MIN_HEIGHT)
 
         requested_width, requested_height = self._saved_window_size or (
-            self.WIDTH,
-            self.HEIGHT,
+            self._scale(TranslatorApp.WIDTH),
+            self._scale(TranslatorApp.HEIGHT),
         )
         screen_width = self.root.winfo_screenwidth()
         if self._position_pinned and self._fixed_position is not None:
@@ -430,53 +433,40 @@ class TranslatorApp:
             pass
 
     def _configure_styles(self) -> None:
-        style = ttk.Style(self.root)
-        try:
-            style.theme_use("clam")
-        except tk.TclError:
-            pass
-        style.configure(
-            "Language.TCombobox",
-            fieldbackground=COLORS["card"],
-            background=COLORS["card"],
-            foreground=COLORS["text"],
-            bordercolor=COLORS["border"],
-            lightcolor=COLORS["border"],
-            darkcolor=COLORS["border"],
-            arrowcolor=COLORS["muted"],
-            padding=(8, 5),
-            font=(FONT, 9),
-        )
-        style.map(
-            "Language.TCombobox",
-            fieldbackground=[("readonly", COLORS["card"])],
-            selectbackground=[("readonly", COLORS["card"])],
-            selectforeground=[("readonly", COLORS["text"])],
-        )
+        configure_ttk_styles(self.root)
 
     def _build_ui(self) -> None:
-        self.surface = tk.Frame(self.root, bg=COLORS["window"])
+        self.surface = tk.Frame(self.root, bg=COLORS["raised"])
         self.surface.pack(fill="both", expand=True, padx=1, pady=1)
 
+        self._build_progress_bar()
         self._build_titlebar()
-
-        content = tk.Frame(self.surface, bg=COLORS["window"])
-        content.pack(fill="both", expand=True, padx=14, pady=(4, 14))
-
-        self._build_input_card(content)
+        separator(self.surface).pack(fill="x")
+        self._build_input_section()
 
         self.footer_status = tk.Label(
-            content,
+            self.surface,
             text=f"就绪  ·  {self.hotkey_spec.display} 划词  ·  Ctrl+Enter 翻译",
-            bg=COLORS["window"],
+            bg=COLORS["raised"],
             fg=COLORS["muted"],
-            font=(FONT, 8),
+            font=FONTS["caption"],
             anchor="w",
         )
-        self.footer_status.pack(side="bottom", fill="x", pady=(8, 0))
+        self.footer_status.pack(side="bottom", fill="x", padx=14, pady=(5, 8))
+        separator(self.surface).pack(side="bottom", fill="x")
 
-        self._build_provider_card(content)
+        self._build_result_section()
         self._build_resize_handles()
+
+    def _build_progress_bar(self) -> None:
+        """A two-pixel marquee that only exists while a request is in flight."""
+        self.progress_track = tk.Frame(
+            self.surface, height=self._scale(2), bg=COLORS["raised"], bd=0,
+            highlightthickness=0
+        )
+        self.progress_track.pack(fill="x")
+        self.progress_track.pack_propagate(False)
+        self.progress_thumb = tk.Frame(self.progress_track, bg=COLORS["accent"], bd=0)
 
     def _build_resize_handles(self) -> None:
         """Overlay resize targets on every edge of the borderless window."""
@@ -582,7 +572,7 @@ class TranslatorApp:
         for edge, cursor, placement in handle_specs:
             handle = tk.Frame(
                 self.root,
-                bg=COLORS["window"],
+                bg=COLORS["raised"],
                 cursor=cursor,
                 bd=0,
                 highlightthickness=0,
@@ -601,283 +591,194 @@ class TranslatorApp:
             self._resize_handles[edge] = handle
 
     def _build_titlebar(self) -> None:
-        titlebar = tk.Frame(self.surface, bg=COLORS["window"], height=38)
-        titlebar.pack(fill="x", padx=8, pady=(4, 1))
+        titlebar = tk.Frame(self.surface, bg=COLORS["raised"], height=self._scale(34))
+        titlebar.pack(fill="x", padx=8, pady=(3, 2))
         titlebar.pack_propagate(False)
 
-        self.pin_button = self._flat_button(
+        self.pin_button = flat_button(
             titlebar,
             "\ue718",
             self.toggle_position_pin,
-            fg=COLORS["muted"],
-            bg=COLORS["window"],
-            active_bg=COLORS["blue_soft"],
+            kind="ghost",
+            bg=COLORS["raised"],
             padx=0,
+            pady=4,
             width=3,
         )
-        self.pin_button.configure(font=("Segoe MDL2 Assets", 11))
-        self.pin_button.pack(side="left", padx=(0, 8), pady=4)
+        self.pin_button.configure(font=ICON_FONT)
+        self.pin_button.pack(side="left", padx=(0, 8), pady=3)
         self._update_position_pin_style()
 
         title = tk.Label(
             titlebar,
             text="Translator",
-            bg=COLORS["window"],
+            bg=COLORS["raised"],
             fg=COLORS["text"],
-            font=(FONT, 10, "bold"),
+            font=FONTS["title"],
         )
-        title.pack(side="left", pady=7)
+        title.pack(side="left", pady=6)
 
-        close_button = self._flat_button(
+        flat_button(
             titlebar,
             "×",
             self.hide_window,
-            fg=COLORS["muted"],
-            bg=COLORS["window"],
-            active_bg="#E6E6E8",
+            kind="ghost",
+            bg=COLORS["raised"],
+            padx=0,
+            pady=4,
             width=3,
-        )
-        close_button.pack(side="right", pady=3)
+        ).pack(side="right", pady=3)
 
-        settings_button = self._flat_button(
+        flat_button(
             titlebar,
             "设置",
             self.open_settings,
-            fg=COLORS["muted"],
-            bg=COLORS["window"],
-            active_bg="#E6E6E8",
-            padx=8,
-        )
-        settings_button.pack(side="right", padx=(0, 3), pady=3)
+            kind="ghost",
+            bg=COLORS["raised"],
+            padx=9,
+            pady=4,
+        ).pack(side="right", padx=(0, 4), pady=3)
 
         for widget in (titlebar, title):
             widget.bind("<ButtonPress-1>", self._start_drag)
             widget.bind("<B1-Motion>", self._drag_window)
             widget.bind("<ButtonRelease-1>", self._finish_drag)
 
-    def _build_input_card(self, parent: tk.Widget) -> None:
-        card = tk.Frame(
-            parent,
-            bg=COLORS["input"],
-            highlightthickness=1,
-            highlightbackground="#EBEBED",
-        )
-        card.pack(fill="x")
+    def _build_input_section(self) -> None:
+        section = tk.Frame(self.surface, bg=COLORS["sunken"])
+        section.pack(fill="x")
 
-        heading = tk.Frame(card, bg=COLORS["input"])
-        heading.pack(fill="x", padx=14, pady=(9, 1))
+        heading = tk.Frame(section, bg=COLORS["sunken"])
+        heading.pack(fill="x", padx=13, pady=(8, 0))
         tk.Label(
             heading,
             text="原文",
-            bg=COLORS["input"],
+            bg=COLORS["sunken"],
             fg=COLORS["muted"],
-            font=(FONT, 8, "bold"),
+            font=FONTS["label"],
         ).pack(side="left")
+
+        # The heading's dead middle carries the two low-stakes text actions, so
+        # the control row below stays legible at the minimum window width.
+        flat_button(
+            heading,
+            "粘贴",
+            self.paste_and_translate,
+            kind="quiet",
+            padx=7,
+            pady=2,
+        ).pack(side="left", padx=(12, 0))
+        flat_button(
+            heading, "清空", self.clear, kind="quiet", padx=7, pady=2
+        ).pack(side="left", padx=(2, 0))
+
         self.counter_label = tk.Label(
             heading,
-            text="0 / 5,000",
-            bg=COLORS["input"],
+            text=f"0 / {MAX_TEXT_LENGTH:,}",
+            bg=COLORS["sunken"],
             fg=COLORS["faint"],
-            font=(FONT, 8),
+            font=FONTS["caption"],
         )
         self.counter_label.pack(side="right")
 
-        self.source_text = tk.Text(
-            card,
-            height=4,
-            wrap="word",
-            undo=True,
-            bd=0,
-            highlightthickness=0,
-            bg=COLORS["input"],
-            fg=COLORS["text"],
-            insertbackground=COLORS["text"],
-            selectbackground="#C8D8FF",
-            padx=14,
+        source_area = scrolling_text(
+            section,
+            font_role="content",
+            height=3,
+            background=COLORS["sunken"],
+            padx=13,
             pady=6,
-            font=(FONT, 14),
+            focus_ring=True,
+            undo=True,
         )
-        self.source_text.pack(fill="x")
+        source_area.container.pack(fill="x", padx=1)
+        self.source_text = source_area.text
 
-        toolbar = tk.Frame(card, bg=COLORS["input"])
-        toolbar.pack(fill="x", padx=12, pady=(2, 7))
-
-        self._flat_button(
-            toolbar,
-            "粘贴",
-            self.paste_and_translate,
-            fg=COLORS["text"],
-            bg=COLORS["card"],
-            active_bg="#ECECEF",
-            padx=10,
-        ).pack(side="left", padx=(0, 6))
-        self._flat_button(
-            toolbar,
-            "清空",
-            self.clear,
-            fg=COLORS["muted"],
-            bg=COLORS["input"],
-            active_bg="#E7E7E9",
-            padx=8,
-        ).pack(side="left")
-
-        self.translate_button = self._flat_button(
-            toolbar,
-            "翻译",
-            self.translate_now,
-            fg="#FFFFFF",
-            bg=COLORS["blue"],
-            active_bg=COLORS["blue_hover"],
-            padx=14,
-        )
-        self.translate_button.pack(side="right")
-
-        language_row = tk.Frame(card, bg=COLORS["input"])
-        language_row.pack(fill="x", padx=12, pady=(0, 9))
+        controls = tk.Frame(section, bg=COLORS["sunken"])
+        controls.pack(fill="x", padx=13, pady=(4, 9))
 
         source_labels = [language.label for language in SOURCE_LANGUAGES]
         target_labels = [language.label for language in TARGET_LANGUAGES]
         self.source_language = ttk.Combobox(
-            language_row,
+            controls,
             values=source_labels,
             state="readonly",
-            style="Language.TCombobox",
-            width=15,
+            style=COMBOBOX_STYLE,
+            width=12,
         )
         self.source_language.set(source_labels[0])
         self.source_language.pack(side="left")
 
-        self._flat_button(
-            language_row,
-            "⇄",
-            self.swap_languages,
-            fg=COLORS["muted"],
-            bg=COLORS["input"],
-            active_bg="#E7E7E9",
-            width=3,
-        ).pack(side="left", padx=7)
+        flat_button(
+            controls, "⇄", self.swap_languages, kind="quiet", padx=0, width=3
+        ).pack(side="left", padx=5)
 
         self.target_language = ttk.Combobox(
-            language_row,
+            controls,
             values=target_labels,
             state="readonly",
-            style="Language.TCombobox",
-            width=15,
+            style=COMBOBOX_STYLE,
+            width=12,
         )
         self.target_language.set("中文（简体）")
         self.target_language.pack(side="left")
+
+        self.translate_button = flat_button(
+            controls, "翻译", self.translate_now, kind="primary", padx=15, pady=6
+        )
+        self.translate_button.pack(side="right")
 
         self.source_text.bind("<FocusIn>", self._remove_placeholder)
         self.source_text.bind("<FocusOut>", self._restore_placeholder_if_empty)
         self.source_text.bind("<KeyRelease>", self._update_counter)
 
-    def _build_provider_card(self, parent: tk.Widget) -> None:
-        self.provider_card = tk.Frame(
-            parent,
-            bg=COLORS["card"],
-            highlightthickness=1,
-            highlightbackground="#DEDEE1",
-        )
-        self.provider_card.pack(fill="both", expand=True, pady=(12, 0))
+    def _build_result_section(self) -> None:
+        separator(self.surface).pack(fill="x")
+        section = tk.Frame(self.surface, bg=COLORS["surface"])
+        section.pack(fill="both", expand=True)
 
-        header = tk.Frame(self.provider_card, bg=COLORS["provider"], height=40)
-        header.pack(fill="x")
-        header.pack_propagate(False)
-
-        badge = tk.Label(
-            header,
-            text="G",
-            width=2,
-            bg="#4285F4",
-            fg="#FFFFFF",
-            font=("Segoe UI", 11, "bold"),
-        )
-        badge.pack(side="left", padx=(11, 9), pady=7)
+        meta_row = tk.Frame(section, bg=COLORS["surface"])
+        meta_row.pack(fill="x", padx=13, pady=(8, 0))
         tk.Label(
-            header,
+            meta_row,
             text="Google Translate",
-            bg=COLORS["provider"],
-            fg=COLORS["text"],
-            font=(FONT, 10, "bold"),
+            bg=COLORS["surface"],
+            fg=COLORS["muted"],
+            font=FONTS["label"],
         ).pack(side="left")
         self.provider_meta = tk.Label(
-            header,
+            meta_row,
             text="等待输入",
-            bg=COLORS["provider"],
-            fg=COLORS["muted"],
-            font=(FONT, 8),
+            bg=COLORS["surface"],
+            fg=COLORS["faint"],
+            font=FONTS["caption"],
         )
-        self.provider_meta.pack(side="right", padx=(6, 12))
+        self.provider_meta.pack(side="left", padx=(8, 0))
 
-        self.result_body = tk.Frame(self.provider_card, bg=COLORS["card"])
-        self.result_body.pack(fill="both", expand=True)
-
-        self.result_text = tk.Text(
-            self.result_body,
-            height=2,
-            wrap="word",
-            bd=0,
-            highlightthickness=0,
-            bg=COLORS["card"],
-            fg=COLORS["text"],
-            selectbackground="#C8D8FF",
-            padx=14,
-            pady=10,
-            font=(FONT, 12),
-            state="disabled",
-            cursor="arrow",
-        )
-        self.result_text.pack(fill="both", expand=True)
-
-        result_actions = tk.Frame(self.result_body, bg=COLORS["card"])
-        result_actions.pack(fill="x", padx=11, pady=(0, 10))
-        self.copy_button = self._flat_button(
-            result_actions,
-            "复制译文",
-            self.copy_result,
-            fg=COLORS["blue"],
-            bg=COLORS["blue_soft"],
-            active_bg="#D9E5FF",
-            padx=10,
+        self.copy_button = flat_button(
+            meta_row, "复制译文", self.copy_result, kind="accent", padx=10, pady=3
         )
         self.copy_button.pack(side="right")
         self.copy_button.configure(state="disabled")
+
+        result_area = scrolling_text(
+            section,
+            font_role="result",
+            height=2,
+            background=COLORS["surface"],
+            padx=13,
+            pady=8,
+            state="disabled",
+            cursor="arrow",
+        )
+        result_area.container.pack(fill="both", expand=True)
+        self.result_text = result_area.text
 
     def _bind_shortcuts(self) -> None:
         self.root.bind_all("<Control-Return>", self.translate_now)
         self.root.bind_all("<Control-KP_Enter>", self.translate_now)
         self.root.bind_all("<Control-l>", self.focus_input)
         self.root.bind_all("<Escape>", lambda _event: self.hide_window())
-
-    def _flat_button(
-        self,
-        parent: tk.Widget,
-        text: str,
-        command: object,
-        *,
-        fg: str,
-        bg: str,
-        active_bg: str | None = None,
-        padx: int = 7,
-        width: int = 0,
-    ) -> tk.Button:
-        return tk.Button(
-            parent,
-            text=text,
-            command=command,
-            fg=fg,
-            bg=bg,
-            activeforeground=fg,
-            activebackground=active_bg or bg,
-            disabledforeground=COLORS["faint"],
-            bd=0,
-            highlightthickness=0,
-            relief="flat",
-            cursor="hand2",
-            padx=padx,
-            width=width,
-            font=(FONT, 8, "bold"),
-        )
 
     def _start_drag(self, event: tk.Event[tk.Misc]) -> None:
         self._drag_offset = (
@@ -988,19 +889,9 @@ class TranslatorApp:
 
     def _update_position_pin_style(self) -> None:
         if self._position_pinned:
-            self.pin_button.configure(
-                fg=COLORS["blue"],
-                bg=COLORS["blue_soft"],
-                activeforeground=COLORS["blue"],
-                activebackground="#D9E5FF",
-            )
+            restyle_button(self.pin_button, "accent")
         else:
-            self.pin_button.configure(
-                fg=COLORS["muted"],
-                bg=COLORS["window"],
-                activeforeground=COLORS["blue"],
-                activebackground=COLORS["blue_soft"],
-            )
+            restyle_button(self.pin_button, "ghost", bg=COLORS["raised"])
 
     def toggle_position_pin(self) -> None:
         self._position_pinned = not self._position_pinned
@@ -1088,7 +979,7 @@ class TranslatorApp:
                 else:
                     self.footer_status.configure(
                         text=f"{preferred.display} 已占用，当前使用 {candidate.display}",
-                        fg=COLORS["purple"],
+                        fg=COLORS["accent"],
                     )
                 return
             last_error = error
@@ -1304,12 +1195,15 @@ class TranslatorApp:
         self._placeholder_active = False
         self.source_text.configure(fg=COLORS["text"])
         self.source_text.delete("1.0", "end")
-        self.source_text.insert("1.0", text[:5_000])
+        self.source_text.insert("1.0", text[:MAX_TEXT_LENGTH])
         self._update_counter()
 
     def _update_counter(self, _event: tk.Event[tk.Misc] | None = None) -> None:
         length = len(self._input_text())
-        self.counter_label.configure(text=f"{length:,} / 5,000")
+        self.counter_label.configure(
+            text=f"{length:,} / {MAX_TEXT_LENGTH:,}",
+            fg=COLORS["warning"] if length >= COUNTER_WARNING_AT else COLORS["faint"],
+        )
 
     def _language_code(self, label: str, options: tuple[Language, ...]) -> str:
         return next(language.code for language in options if language.label == label)
@@ -1412,7 +1306,7 @@ class TranslatorApp:
                         result.detected_source_language or "auto"
                     )
                     self.provider_meta.configure(
-                        text=f"检测到 {detected}", fg=COLORS["purple"]
+                        text=f"检测到 {detected}", fg=COLORS["accent"]
                     )
                     self.footer_status.configure(
                         text=f"翻译完成  ·  {self.hotkey_spec.display} 继续划词",
@@ -1428,9 +1322,32 @@ class TranslatorApp:
             text="翻译中…" if busy else "翻译",
             state="disabled" if busy else "normal",
         )
+        self._set_progress_running(busy)
         if busy:
-            self.provider_meta.configure(text="请求中…", fg=COLORS["blue"])
-            self.footer_status.configure(text="正在调用 Google Translate…", fg=COLORS["blue"])
+            self.provider_meta.configure(text="请求中…", fg=COLORS["accent"])
+            self.footer_status.configure(
+                text="正在调用 Google Translate…", fg=COLORS["accent"]
+            )
+
+    def _set_progress_running(self, running: bool) -> None:
+        if running == self._progress_running:
+            return
+        self._progress_running = running
+        if not running:
+            self.progress_thumb.place_forget()
+            return
+        self._progress_offset = -MARQUEE_SPAN
+        self.progress_thumb.place(
+            relx=self._progress_offset, rely=0, relwidth=MARQUEE_SPAN, relheight=1
+        )
+        self._tick_progress()
+
+    def _tick_progress(self) -> None:
+        if self._closed or not self._progress_running:
+            return
+        self._progress_offset = advance_marquee(self._progress_offset)
+        self.progress_thumb.place_configure(relx=self._progress_offset)
+        self.root.after(self.PROGRESS_INTERVAL_MS, self._tick_progress)
 
     def _show_result(self, text: str, *, color: str | None = None) -> None:
         self.result_text.configure(state="normal", fg=color or COLORS["text"])
@@ -1461,7 +1378,14 @@ class TranslatorApp:
         self.root.clipboard_append(text)
         self.root.update_idletasks()
         self.copy_button.configure(text="已复制")
-        self.root.after(1_200, lambda: self.copy_button.configure(text="复制译文"))
+        restyle_button(self.copy_button, "success")
+        self.root.after(1_200, self._reset_copy_button)
+
+    def _reset_copy_button(self) -> None:
+        if self._closed:
+            return
+        self.copy_button.configure(text="复制译文")
+        restyle_button(self.copy_button, "accent")
 
     def focus_input(self, _event: tk.Event[tk.Misc] | None = None) -> str:
         self.show_window()
