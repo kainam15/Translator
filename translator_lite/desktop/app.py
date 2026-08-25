@@ -26,6 +26,7 @@ from ..windows.hotkey import (
 from ..windows.mouse import GlobalMouseClick, window_at_point_is_current_process
 from ..windows.selection import get_selected_text_by_automation
 from ..windows.tray import SystemTray
+from ..windows.window import redraw_window, set_window_bounds, set_window_position
 from .placement import clamp_window_position, resize_window_geometry
 from .settings import AppSettings, load_settings, save_settings
 
@@ -887,7 +888,7 @@ class TranslatorApp:
     def _drag_window(self, event: tk.Event[tk.Misc]) -> None:
         x = event.x_root - self._drag_offset[0]
         y = event.y_root - self._drag_offset[1]
-        self.root.geometry(f"+{x}+{y}")
+        self._place_window(x, y)
 
     def _start_resize(self, event: tk.Event[tk.Misc], edge: str) -> str:
         self.root.update_idletasks()
@@ -911,8 +912,15 @@ class TranslatorApp:
             self._resize_start_geometry,
             (self.MIN_WIDTH, self.MIN_HEIGHT),
         )
-        # Tk accepts "+-100" as an absolute negative virtual-screen coordinate.
-        self.root.geometry(f"{width}x{height}+{x}+{y}")
+        if not set_window_bounds(
+            self.root.winfo_id(),
+            x,
+            y,
+            width,
+            height,
+        ):
+            # Tk accepts "+-100" as an absolute negative virtual-screen coordinate.
+            self.root.geometry(f"{width}x{height}+{x}+{y}")
         return "break"
 
     def _finish_resize(
@@ -922,6 +930,7 @@ class TranslatorApp:
             return "break"
         self._resize_edge = None
         self.root.update_idletasks()
+        redraw_window(self.root.winfo_id(), immediate=True)
 
         if self._position_pinned:
             self._fixed_position = self._bounded_position(
@@ -956,8 +965,9 @@ class TranslatorApp:
         )
 
     def _place_window(self, x: int, y: int) -> None:
-        # Tk accepts "+-100" for a negative virtual-screen coordinate.
-        self.root.geometry(f"+{x}+{y}")
+        if not set_window_position(self.root.winfo_id(), x, y):
+            # Tk accepts "+-100" for a negative virtual-screen coordinate.
+            self.root.geometry(f"+{x}+{y}")
 
     def _place_at_fixed_position(self) -> bool:
         if not self._position_pinned or self._fixed_position is None:

@@ -1,1 +1,1 @@
-"""Windows adapters for hotkeys, selection, mouse hooks, and the system tray."""
+"""Windows adapters for hotkeys, selection, windows, mouse hooks, and the tray."""

@@ -48,6 +48,7 @@ class WindowResizeUiTests(unittest.TestCase):
 
     def test_southeast_drag_resizes_real_tk_window(self) -> None:
         root = tk.Tk()
+        root.overrideredirect(True)
         root.attributes("-alpha", 0.0)
         root.minsize(440, 500)
         root.geometry("720x660+100+100")
