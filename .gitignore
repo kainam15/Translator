@@ -1,0 +1,32 @@
+# Python bytecode and test caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local virtual environments and secrets
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# PyInstaller output and temporary side builds
+build/
+build-*/
+dist/
+dist-*/
+
+# Local logs and temporary files
+*.log
+*.tmp
+
+# OS metadata
+.DS_Store
+Thumbs.db
+desktop.ini

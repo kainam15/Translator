@@ -210,13 +210,26 @@ class HotkeySettingsDialog:
         self.window.protocol("WM_DELETE_WINDOW", self.cancel)
         self.window.bind("<KeyPress>", self._on_key_press)
 
-        width, height = 600, 260
+        width = 600
         app.root.update_idletasks()
+        self._build()
+
+        # Font metrics grow with Windows DPI scaling. Size the client area from
+        # its real requested height so the bottom action row cannot be clipped.
+        self.window.update_idletasks()
+        height = max(300, self.window.winfo_reqheight() + 4)
         x = app.root.winfo_x() + max(0, (app.root.winfo_width() - width) // 2)
         y = app.root.winfo_y() + max(0, (app.root.winfo_height() - height) // 2)
+        root_center_x = app.root.winfo_x() + app.root.winfo_width() // 2
+        root_center_y = app.root.winfo_y() + app.root.winfo_height() // 2
+        x, y = clamp_window_position(
+            x,
+            y,
+            width,
+            height,
+            work_area_for_point(root_center_x, root_center_y),
+        )
         self.window.geometry(f"{width}x{height}+{x}+{y}")
-
-        self._build()
         self.window.after(30, self.window.focus_force)
 
     def _build(self) -> None:
