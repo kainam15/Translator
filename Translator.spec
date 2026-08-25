@@ -4,7 +4,7 @@ a = Analysis(
     ["Translator.pyw"],
     pathex=[],
     binaries=[],
-    datas=[("assets/translator_icon.ico", "assets")],
+    datas=[("translator_lite/assets/translator_icon.ico", "assets")],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -34,5 +34,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=["assets/translator_icon.ico"],
+    icon=["translator_lite/assets/translator_icon.ico"],
 )

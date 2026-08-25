@@ -1,8 +1,8 @@
 import tkinter as tk
 import unittest
 
-from desktop_app import HotkeySettingsDialog
-from windows_hotkey import DEFAULT_HOTKEY, HotkeySpec
+from translator_lite.desktop.app import HotkeySettingsDialog
+from translator_lite.windows.hotkey import DEFAULT_HOTKEY, HotkeySpec
 
 
 class _FakeApp:

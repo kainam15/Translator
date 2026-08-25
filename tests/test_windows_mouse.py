@@ -3,7 +3,7 @@ import queue
 import unittest
 from unittest.mock import Mock
 
-from windows_mouse import (
+from translator_lite.windows.mouse import (
     MOUSE_BUTTON_DOWN_MESSAGES,
     MSLLHOOKSTRUCT,
     POINT,

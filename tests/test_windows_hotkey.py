@@ -1,7 +1,7 @@
 import ctypes
 import unittest
 
-from windows_hotkey import DEFAULT_HOTKEY, INPUT, HotkeySpec
+from translator_lite.windows.hotkey import DEFAULT_HOTKEY, INPUT, HotkeySpec
 
 
 class HotkeySpecTests(unittest.TestCase):

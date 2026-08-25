@@ -2,33 +2,31 @@
 
 ## Project Structure & Module Organization
 
-The flat layout is intentional. `google_translate_client.py` owns Google Translate RPC transport and parsing. `desktop_app.py` implements the Tkinter interface; `windows_hotkey.py`, `windows_selection.py`, and `windows_tray.py` isolate native Windows behavior. `Translator.pyw` is the desktop entry point, while `app.py` serves `static/index.html`. Assets live in `assets/`, tests use root-level `test_*.py` files, and packaging uses `Translator.spec` plus `build_exe.ps1`. Treat `dist/`, `build/`, and `__pycache__/` as generated output.
+Runtime code lives in the `translator_lite/` package. `client.py` implements translation transport and parsing. `desktop/` owns the Tkinter app, persisted settings, and window placement. Native Windows implementations belong in `windows/`; the local HTTP tester and its page live in `web/`. Package resources are under `assets/`. Keep tests in `tests/`, build automation in `scripts/`, and PyInstaller configuration in `Translator.spec`. Root files `Translator.pyw`, `app.py`, and `google_translate_client.py` are compatibility launchers; keep them thin. Domain responsibilities and constraints are documented in `CONTEXT.md`.
 
 ## Build, Test, and Development Commands
 
 Run these from PowerShell at the repository root:
 
-- `pythonw .\Translator.pyw` starts the desktop app without a console window.
-- `python -X utf8 .\app.py` starts the browser tester at `http://127.0.0.1:8000`.
-- `python -X utf8 .\google_translate_client.py "Hello" --to zh-CN` exercises the translation client directly.
-- `python -m unittest -v` runs the complete test suite.
-- `python -m pip install PyInstaller` installs the build-only dependency.
-- `.\build_exe.ps1` creates the Windows executable in `dist\Translator.exe`.
-
-Use `-X utf8` when redirected output may contain Chinese text. If PowerShell blocks scripts, run `powershell -ExecutionPolicy Bypass -File .\build_exe.ps1`.
+- `python -m pip install -e .` installs editable commands for development.
+- `python -m translator_lite` starts the desktop app.
+- `python -X utf8 -m translator_lite.web.server` starts the tester at `http://127.0.0.1:8000`.
+- `python -B -m unittest discover -s tests -v` runs all tests without writing bytecode.
+- `python -m pip install -e ".[build]"` installs the PyInstaller build extra.
+- `.\scripts\build_exe.ps1` creates `dist\Translator.exe`.
 
 ## Coding Style & Naming Conventions
 
-Use four-space indentation and PEP 8 layout. Use `snake_case` for modules, functions, and variables; `PascalCase` for classes; `UPPER_CASE` for constants. Type-hint public and platform-boundary APIs. Keep Win32 `ctypes` declarations explicit, including `argtypes`, `restype`, and structure fields. Preserve the standard-library-only runtime; justify new packages. No formatter or linter is configured, so match surrounding code.
+Use four spaces and PEP 8 layout. Use `snake_case` for modules, functions, and variables; `PascalCase` for classes; `UPPER_CASE` for constants. Type-hint public and platform-facing interfaces. Keep Win32 `ctypes` declarations explicit, including `argtypes`, `restype`, and structure fields. Runtime code must remain standard-library-only unless a change documents and justifies a new dependency. Prefer relative imports inside the package.
 
 ## Testing Guidelines
 
-Tests use Python `unittest`. Name files `test_<module>.py` and methods `test_<behavior>`. Cover RPC parsing, clipboard/UI Automation fallbacks, hotkeys, tray routing, and high-DPI placement when changed. Never modify the user's real `%APPDATA%\TranslatorLite\settings.json`; use temporary paths and clean up spawned windows or processes. Run the full suite before submitting.
+Tests use `unittest`. Name files `test_<module>.py` and methods `test_<behavior>`. Match tests to package seams: settings tests use temporary paths, Windows tests verify ABI layouts and message routing, and UI tests must clean up every window or process. Add regression coverage for RPC parsing, selection fallbacks, hotkeys, mouse hooks, tray lifecycle, and high-DPI placement when changed.
 
 ## Commit & Pull Request Guidelines
 
-Follow existing history: write short, feature-focused Chinese commit summaries. Keep commits coherent. Pull requests should explain behavior, list verification commands and results, link issues when applicable, and include screenshots for Tkinter, browser, tray-icon, or DPI-related UI changes. State the Windows version and display scaling tested. Commit generated files only when intentionally updating a release artifact.
+Follow repository history with short, feature-focused Chinese commit summaries. Keep commits coherent. Pull requests must describe user-visible behavior, list verification commands and results, and link issues when applicable. Include screenshots for Tkinter, browser, tray-icon, or DPI changes, plus the tested Windows version and display scaling.
 
-## Security & Configuration Tips
+## Security & Release Notes
 
-The client calls an undocumented Google Translate web RPC that may change. Never commit cookies, API keys, personal settings, or captured private text. Selected text is sent to Google. Any new `Ctrl+C` fallback path must preserve and restore clipboard state.
+Never commit generated `dist/`, `build/`, bytecode, secrets, settings, or captured text. Selected text is sent to Google. The undocumented web RPC is unstable; do not present it as a guaranteed production interface. A public release also requires an explicit maintainer-selected `LICENSE`.

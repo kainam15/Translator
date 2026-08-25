@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import Mock, patch
 
-from desktop_app import TranslatorApp
+from translator_lite.desktop.app import TranslatorApp
 
 
 class DesktopWindowDismissTests(unittest.TestCase):
@@ -13,7 +13,10 @@ class DesktopWindowDismissTests(unittest.TestCase):
         app.root.state.return_value = "normal"
         return app
 
-    @patch("desktop_app.window_at_point_is_current_process", return_value=False)
+    @patch(
+        "translator_lite.desktop.app.window_at_point_is_current_process",
+        return_value=False,
+    )
     def test_global_click_in_another_process_hides_visible_window(
         self, _target_check: Mock
     ) -> None:
@@ -24,7 +27,10 @@ class DesktopWindowDismissTests(unittest.TestCase):
 
         app.hide_window.assert_called_once_with()
 
-    @patch("desktop_app.window_at_point_is_current_process", return_value=True)
+    @patch(
+        "translator_lite.desktop.app.window_at_point_is_current_process",
+        return_value=True,
+    )
     def test_global_click_in_translator_keeps_window_visible(
         self, _target_check: Mock
     ) -> None:
@@ -35,7 +41,10 @@ class DesktopWindowDismissTests(unittest.TestCase):
 
         app.hide_window.assert_not_called()
 
-    @patch("desktop_app.window_at_point_is_current_process", return_value=False)
+    @patch(
+        "translator_lite.desktop.app.window_at_point_is_current_process",
+        return_value=False,
+    )
     def test_settings_dialog_disables_click_outside_dismissal(
         self, _target_check: Mock
     ) -> None:
@@ -48,7 +57,10 @@ class DesktopWindowDismissTests(unittest.TestCase):
         _target_check.assert_not_called()
         app.hide_window.assert_not_called()
 
-    @patch("desktop_app.window_at_point_is_current_process", return_value=False)
+    @patch(
+        "translator_lite.desktop.app.window_at_point_is_current_process",
+        return_value=False,
+    )
     def test_global_click_is_ignored_when_window_is_already_hidden(
         self, _target_check: Mock
     ) -> None:

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import argparse
 import ctypes
-import json
-import os
 import queue
 import sys
 import threading
@@ -15,8 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from tkinter import ttk
 
-from google_translate_client import GoogleTranslateError, TranslationResult, translate
-from windows_hotkey import (
+from ..client import GoogleTranslateError, TranslationResult, translate
+from ..windows.hotkey import (
     DEFAULT_HOTKEY,
     GlobalHotkey,
     HotkeySpec,
@@ -25,9 +23,11 @@ from windows_hotkey import (
     send_copy_shortcut,
     work_area_for_point,
 )
-from windows_mouse import GlobalMouseClick, window_at_point_is_current_process
-from windows_selection import get_selected_text_by_automation
-from windows_tray import SystemTray
+from ..windows.mouse import GlobalMouseClick, window_at_point_is_current_process
+from ..windows.selection import get_selected_text_by_automation
+from ..windows.tray import SystemTray
+from .placement import clamp_window_position
+from .settings import AppSettings, load_settings, save_settings
 
 
 @dataclass(frozen=True)
@@ -68,8 +68,6 @@ COLORS = {
 
 FONT = "Microsoft YaHei UI"
 PLACEHOLDER = "输入要翻译的文本…"
-CONFIG_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "TranslatorLite"
-CONFIG_FILE = CONFIG_DIR / "settings.json"
 HOTKEY_FALLBACKS = (
     HotkeySpec(("Alt", "Shift"), "W"),
     HotkeySpec(("Ctrl", "Alt"), "T"),
@@ -78,71 +76,9 @@ HOTKEY_FALLBACKS = (
 
 def resource_path(relative_path: str) -> Path:
     """Resolve a project asset both from source and a PyInstaller bundle."""
-    source_root = Path(__file__).resolve().parent
+    source_root = Path(__file__).resolve().parents[1]
     bundle_root = Path(getattr(sys, "_MEIPASS", source_root))
     return bundle_root / relative_path
-
-
-@dataclass(frozen=True)
-class AppSettings:
-    hotkey: HotkeySpec
-    position_pinned: bool = False
-    window_position: tuple[int, int] | None = None
-
-
-def settings_from_payload(payload: object) -> AppSettings:
-    """Parse settings defensively and keep old hotkey-only files compatible."""
-    if not isinstance(payload, dict):
-        return AppSettings(DEFAULT_HOTKEY)
-
-    try:
-        hotkey = HotkeySpec.from_dict(payload.get("hotkey"))
-    except ValueError:
-        hotkey = DEFAULT_HOTKEY
-
-    raw_position = payload.get("window_position")
-    position: tuple[int, int] | None = None
-    if isinstance(raw_position, dict):
-        x = raw_position.get("x")
-        y = raw_position.get("y")
-        if (
-            isinstance(x, int)
-            and not isinstance(x, bool)
-            and isinstance(y, int)
-            and not isinstance(y, bool)
-        ):
-            position = (x, y)
-
-    position_pinned = payload.get("position_pinned") is True and position is not None
-    return AppSettings(hotkey, position_pinned, position)
-
-
-def settings_to_payload(settings: AppSettings) -> dict[str, object]:
-    position = None
-    if settings.window_position is not None:
-        position = {
-            "x": settings.window_position[0],
-            "y": settings.window_position[1],
-        }
-    return {
-        "hotkey": settings.hotkey.to_dict(),
-        "position_pinned": settings.position_pinned,
-        "window_position": position,
-    }
-
-
-def clamp_window_position(
-    x: int,
-    y: int,
-    width: int,
-    height: int,
-    work_area: tuple[int, int, int, int],
-) -> tuple[int, int]:
-    """Keep the complete window inside the selected monitor's work area."""
-    left, top, right, bottom = work_area
-    max_x = max(left, right - width)
-    max_y = max(top, bottom - height)
-    return max(left, min(x, max_x)), max(top, min(y, max_y))
 
 
 def enable_dpi_awareness() -> None:
@@ -156,37 +92,6 @@ def enable_dpi_awareness() -> None:
             ctypes.windll.user32.SetProcessDPIAware()
         except (AttributeError, OSError):
             pass
-
-
-def load_settings() -> AppSettings:
-    try:
-        payload = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        return settings_from_payload(payload)
-    except (OSError, json.JSONDecodeError):
-        return AppSettings(DEFAULT_HOTKEY)
-
-
-def save_settings(settings: AppSettings) -> None:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    temp_file = CONFIG_FILE.with_suffix(".tmp")
-    temp_file.write_text(
-        json.dumps(settings_to_payload(settings), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    temp_file.replace(CONFIG_FILE)
-
-
-def load_hotkey() -> HotkeySpec:
-    """Backward-compatible helper retained for callers of the earlier version."""
-    return load_settings().hotkey
-
-
-def save_hotkey(spec: HotkeySpec) -> None:
-    """Update only the hotkey while preserving position-pin settings."""
-    settings = load_settings()
-    save_settings(
-        AppSettings(spec, settings.position_pinned, settings.window_position)
-    )
 
 
 class HotkeySettingsDialog:

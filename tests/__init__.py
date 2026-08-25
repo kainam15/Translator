@@ -1,0 +1,1 @@
+"""Translator Lite test suite."""

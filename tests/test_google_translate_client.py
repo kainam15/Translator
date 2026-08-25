@@ -2,7 +2,7 @@ import json
 import unittest
 from urllib.parse import parse_qs
 
-from google_translate_client import build_request_body, parse_response
+from translator_lite.client import build_request_body, parse_response
 
 
 class GoogleTranslateClientTests(unittest.TestCase):

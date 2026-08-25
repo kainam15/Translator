@@ -1,4 +1,4 @@
-from desktop_app import main
+from translator_lite.desktop.app import main
 
 
 if __name__ == "__main__":

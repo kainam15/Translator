@@ -1,7 +1,7 @@
 import ctypes
 import unittest
 
-from windows_selection import GUID
+from translator_lite.windows.selection import GUID
 
 
 class WindowsSelectionTests(unittest.TestCase):

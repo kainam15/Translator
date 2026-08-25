@@ -1,7 +1,7 @@
 import queue
 import unittest
 
-from windows_tray import (
+from translator_lite.windows.tray import (
     MENU_EXIT,
     MENU_SETTINGS,
     MENU_SHOW,
@@ -30,7 +30,9 @@ class SystemTrayTests(unittest.TestCase):
                 raise AssertionError("custom icon should not use the fallback")
 
         user32 = FakeUser32()
-        tray = SystemTray(queue.Queue(), icon_path="assets/translator_icon.ico")
+        tray = SystemTray(
+            queue.Queue(), icon_path="translator_lite/assets/translator_icon.ico"
+        )
 
         self.assertEqual(tray._load_icon(user32), 321)
         self.assertEqual(tray._load_icon(user32), 321)

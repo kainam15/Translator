@@ -1,0 +1,1 @@
+"""Native Tkinter desktop application."""

@@ -7,6 +7,8 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+*.egg-info/
+.eggs/
 
 # Local virtual environments and secrets
 .venv/
@@ -21,6 +23,8 @@ build/
 build-*/
 dist/
 dist-*/
+wheelhouse/
+.artifacts/
 
 # Local logs and temporary files
 *.log

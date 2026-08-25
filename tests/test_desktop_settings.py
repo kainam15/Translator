@@ -1,12 +1,15 @@
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
-from desktop_app import (
+from translator_lite.desktop.settings import (
     AppSettings,
-    clamp_window_position,
+    load_settings,
+    save_settings,
     settings_from_payload,
     settings_to_payload,
 )
-from windows_hotkey import DEFAULT_HOTKEY, HotkeySpec
+from translator_lite.windows.hotkey import DEFAULT_HOTKEY, HotkeySpec
 
 
 class DesktopSettingsTests(unittest.TestCase):
@@ -42,17 +45,25 @@ class DesktopSettingsTests(unittest.TestCase):
         self.assertFalse(settings.position_pinned)
         self.assertIsNone(settings.window_position)
 
-    def test_clamp_keeps_window_inside_positive_work_area(self) -> None:
-        self.assertEqual(
-            clamp_window_position(1800, -20, 720, 660, (0, 0, 1920, 1040)),
-            (1200, 0),
+    def test_file_round_trip_uses_an_explicit_path(self) -> None:
+        original = AppSettings(
+            HotkeySpec(("Ctrl", "Alt"), "T"),
+            position_pinned=True,
+            window_position=(100, 200),
         )
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "nested" / "settings.json"
 
-    def test_clamp_supports_negative_monitor_coordinates(self) -> None:
-        self.assertEqual(
-            clamp_window_position(-2500, 500, 720, 660, (-1920, 0, 0, 1080)),
-            (-1920, 420),
-        )
+            save_settings(original, path)
+
+            self.assertEqual(load_settings(path), original)
+
+    def test_invalid_json_falls_back_to_defaults(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            path.write_text("not-json", encoding="utf-8")
+
+            self.assertEqual(load_settings(path), AppSettings(DEFAULT_HOTKEY))
 
 
 if __name__ == "__main__":
