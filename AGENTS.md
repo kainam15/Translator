@@ -21,7 +21,7 @@ Use four spaces and PEP 8 layout. Use `snake_case` for modules, functions, and v
 
 ## Testing Guidelines
 
-Tests use `unittest`. Name files `test_<module>.py` and methods `test_<behavior>`. Match tests to package seams: settings tests use temporary paths, Windows tests verify ABI layouts and message routing, and UI tests must clean up every window or process. Add regression coverage for RPC parsing, selection fallbacks, hotkeys, mouse hooks, tray lifecycle, and high-DPI placement when changed.
+Tests use `unittest`. Name files `test_<module>.py` and methods `test_<behavior>`. Match tests to package seams: settings tests use temporary paths, Windows tests verify ABI layouts and message routing, and UI tests must clean up every window or process. Add regression coverage for RPC parsing, selection fallbacks, hotkeys, mouse hooks, tray lifecycle, resizing, and high-DPI placement when changed.
 
 ## Commit & Pull Request Guidelines
 

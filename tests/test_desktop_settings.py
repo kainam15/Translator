@@ -21,12 +21,14 @@ class DesktopSettingsTests(unittest.TestCase):
         self.assertEqual(settings.hotkey.display, "Ctrl+Alt+T")
         self.assertFalse(settings.position_pinned)
         self.assertIsNone(settings.window_position)
+        self.assertIsNone(settings.window_size)
 
     def test_position_pin_round_trip(self) -> None:
         original = AppSettings(
             HotkeySpec(("Alt",), "W"),
             position_pinned=True,
             window_position=(-720, 84),
+            window_size=(880, 720),
         )
 
         restored = settings_from_payload(settings_to_payload(original))
@@ -45,11 +47,22 @@ class DesktopSettingsTests(unittest.TestCase):
         self.assertFalse(settings.position_pinned)
         self.assertIsNone(settings.window_position)
 
+    def test_invalid_window_size_is_ignored(self) -> None:
+        settings = settings_from_payload(
+            {
+                "hotkey": DEFAULT_HOTKEY.to_dict(),
+                "window_size": {"width": True, "height": -1},
+            }
+        )
+
+        self.assertIsNone(settings.window_size)
+
     def test_file_round_trip_uses_an_explicit_path(self) -> None:
         original = AppSettings(
             HotkeySpec(("Ctrl", "Alt"), "T"),
             position_pinned=True,
             window_position=(100, 200),
+            window_size=(760, 680),
         )
         with TemporaryDirectory() as directory:
             path = Path(directory) / "nested" / "settings.json"

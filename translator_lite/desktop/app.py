@@ -26,7 +26,7 @@ from ..windows.hotkey import (
 from ..windows.mouse import GlobalMouseClick, window_at_point_is_current_process
 from ..windows.selection import get_selected_text_by_automation
 from ..windows.tray import SystemTray
-from .placement import clamp_window_position
+from .placement import clamp_window_position, resize_window_geometry
 from .settings import AppSettings, load_settings, save_settings
 
 
@@ -315,11 +315,19 @@ class HotkeySettingsDialog:
 class TranslatorApp:
     WIDTH = 720
     HEIGHT = 660
+    MIN_WIDTH = 440
+    MIN_HEIGHT = 500
+    RESIZE_BORDER = 6
+    RESIZE_CORNER = 8
 
     def __init__(self, root: tk.Tk, *, decorated: bool = False) -> None:
         self.root = root
         self._decorated = decorated
         self._drag_offset = (0, 0)
+        self._resize_edge: str | None = None
+        self._resize_start_pointer = (0, 0)
+        self._resize_start_geometry = (0, 0, self.WIDTH, self.HEIGHT)
+        self._resize_handles: dict[str, tk.Frame] = {}
         self._placeholder_active = True
         self._busy = False
         self._request_id = 0
@@ -331,6 +339,7 @@ class TranslatorApp:
         self.hotkey_spec = settings.hotkey
         self._position_pinned = settings.position_pinned
         self._fixed_position = settings.window_position
+        self._saved_window_size = settings.window_size
         self._icon_path = resource_path("assets/translator_icon.ico")
         self._hotkey_events: queue.Queue[str] = queue.Queue()
         self._hotkey_manager = GlobalHotkey(self._hotkey_events)
@@ -366,14 +375,38 @@ class TranslatorApp:
         self.root.overrideredirect(not self._decorated)
         self.root.configure(bg=COLORS["border"])
         self.root.attributes("-topmost", True)
-        self.root.minsize(440, 500)
+        self.root.minsize(self.MIN_WIDTH, self.MIN_HEIGHT)
+
+        requested_width, requested_height = self._saved_window_size or (
+            self.WIDTH,
+            self.HEIGHT,
+        )
+        screen_width = self.root.winfo_screenwidth()
+        if self._position_pinned and self._fixed_position is not None:
+            reference_x, reference_y = self._fixed_position
+        else:
+            reference_x, reference_y = screen_width - 1, 54
+        work_area = work_area_for_point(reference_x, reference_y)
+        left, top, right, bottom = work_area
+        width = max(self.MIN_WIDTH, min(requested_width, right - left))
+        height = max(self.MIN_HEIGHT, min(requested_height, bottom - top))
 
         if self._position_pinned and self._fixed_position is not None:
-            x, y = self._bounded_position(*self._fixed_position)
+            x, y = clamp_window_position(
+                *self._fixed_position,
+                width,
+                height,
+                work_area,
+            )
         else:
-            screen_width = self.root.winfo_screenwidth()
-            x, y = max(20, screen_width - self.WIDTH - 42), 54
-        self.root.geometry(f"{self.WIDTH}x{self.HEIGHT}+{x}+{y}")
+            x, y = clamp_window_position(
+                right - width - 42,
+                top + 54,
+                width,
+                height,
+                work_area,
+            )
+        self.root.geometry(f"{width}x{height}+{x}+{y}")
         self.root.protocol("WM_DELETE_WINDOW", self.hide_window)
         if not self._decorated:
             self.root.after(20, self._apply_windows_rounding)
@@ -442,6 +475,129 @@ class TranslatorApp:
         self.footer_status.pack(side="bottom", fill="x", pady=(8, 0))
 
         self._build_provider_card(content)
+        self._build_resize_handles()
+
+    def _build_resize_handles(self) -> None:
+        """Overlay resize targets on every edge of the borderless window."""
+        if self._decorated:
+            return
+
+        border = self.RESIZE_BORDER
+        corner = self.RESIZE_CORNER
+        inset = 1
+        handle_specs: tuple[tuple[str, str, dict[str, float | int]], ...] = (
+            (
+                "n",
+                "sb_v_double_arrow",
+                {
+                    "x": corner,
+                    "y": inset,
+                    "relwidth": 1.0,
+                    "width": -2 * corner,
+                    "height": border,
+                },
+            ),
+            (
+                "s",
+                "sb_v_double_arrow",
+                {
+                    "x": corner,
+                    "rely": 1.0,
+                    "y": -(border + inset),
+                    "relwidth": 1.0,
+                    "width": -2 * corner,
+                    "height": border,
+                },
+            ),
+            (
+                "w",
+                "sb_h_double_arrow",
+                {
+                    "x": inset,
+                    "y": corner,
+                    "width": border,
+                    "relheight": 1.0,
+                    "height": -2 * corner,
+                },
+            ),
+            (
+                "e",
+                "sb_h_double_arrow",
+                {
+                    "relx": 1.0,
+                    "x": -(border + inset),
+                    "y": corner,
+                    "width": border,
+                    "relheight": 1.0,
+                    "height": -2 * corner,
+                },
+            ),
+            (
+                "nw",
+                "size_nw_se",
+                {
+                    "x": inset,
+                    "y": inset,
+                    "width": corner,
+                    "height": corner,
+                },
+            ),
+            (
+                "ne",
+                "size_ne_sw",
+                {
+                    "relx": 1.0,
+                    "x": -(corner + inset),
+                    "y": inset,
+                    "width": corner,
+                    "height": corner,
+                },
+            ),
+            (
+                "sw",
+                "size_ne_sw",
+                {
+                    "x": inset,
+                    "rely": 1.0,
+                    "y": -(corner + inset),
+                    "width": corner,
+                    "height": corner,
+                },
+            ),
+            (
+                "se",
+                "size_nw_se",
+                {
+                    "relx": 1.0,
+                    "rely": 1.0,
+                    "x": -(corner + inset),
+                    "y": -(corner + inset),
+                    "width": corner,
+                    "height": corner,
+                },
+            ),
+        )
+
+        for edge, cursor, placement in handle_specs:
+            handle = tk.Frame(
+                self.root,
+                bg=COLORS["window"],
+                cursor=cursor,
+                bd=0,
+                highlightthickness=0,
+                takefocus=False,
+            )
+            handle.place(**placement)
+            handle.bind(
+                "<ButtonPress-1>",
+                lambda event, resize_edge=edge: self._start_resize(
+                    event, resize_edge
+                ),
+            )
+            handle.bind("<B1-Motion>", self._resize_window)
+            handle.bind("<ButtonRelease-1>", self._finish_resize)
+            handle.lift()
+            self._resize_handles[edge] = handle
 
     def _build_titlebar(self) -> None:
         titlebar = tk.Frame(self.surface, bg=COLORS["window"], height=38)
@@ -733,11 +889,60 @@ class TranslatorApp:
         y = event.y_root - self._drag_offset[1]
         self.root.geometry(f"+{x}+{y}")
 
+    def _start_resize(self, event: tk.Event[tk.Misc], edge: str) -> str:
+        self.root.update_idletasks()
+        self._resize_edge = edge
+        self._resize_start_pointer = (event.x_root, event.y_root)
+        self._resize_start_geometry = (
+            self.root.winfo_x(),
+            self.root.winfo_y(),
+            self.root.winfo_width(),
+            self.root.winfo_height(),
+        )
+        return "break"
+
+    def _resize_window(self, event: tk.Event[tk.Misc]) -> str:
+        if self._resize_edge is None:
+            return "break"
+        x, y, width, height = resize_window_geometry(
+            self._resize_edge,
+            self._resize_start_pointer,
+            (event.x_root, event.y_root),
+            self._resize_start_geometry,
+            (self.MIN_WIDTH, self.MIN_HEIGHT),
+        )
+        # Tk accepts "+-100" as an absolute negative virtual-screen coordinate.
+        self.root.geometry(f"{width}x{height}+{x}+{y}")
+        return "break"
+
+    def _finish_resize(
+        self, _event: tk.Event[tk.Misc] | None = None
+    ) -> str:
+        if self._resize_edge is None:
+            return "break"
+        self._resize_edge = None
+        self.root.update_idletasks()
+
+        if self._position_pinned:
+            self._fixed_position = self._bounded_position(
+                self.root.winfo_x(), self.root.winfo_y()
+            )
+            self._place_window(*self._fixed_position)
+
+        try:
+            self._persist_settings()
+        except OSError as exc:
+            self.footer_status.configure(
+                text=f"窗口大小已生效，但设置无法保存: {exc}",
+                fg=COLORS["danger"],
+            )
+        return "break"
+
     def _window_size(self) -> tuple[int, int]:
         self.root.update_idletasks()
         return (
-            max(self.WIDTH, self.root.winfo_width()),
-            max(self.HEIGHT, self.root.winfo_height()),
+            max(self.MIN_WIDTH, self.root.winfo_width()),
+            max(self.MIN_HEIGHT, self.root.winfo_height()),
         )
 
     def _bounded_position(self, x: int, y: int) -> tuple[int, int]:
@@ -765,6 +970,7 @@ class TranslatorApp:
             self.hotkey_spec,
             self._position_pinned,
             self._fixed_position,
+            self._window_size(),
         )
 
     def _persist_settings(self) -> None:

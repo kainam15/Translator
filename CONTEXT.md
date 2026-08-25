@@ -4,7 +4,7 @@
 
 - **Translation Client**: builds the Google Translate web RPC request and turns its response into a `TranslationResult`.
 - **Desktop App**: owns the Tkinter window lifecycle and coordinates translation, selection, hotkeys, and tray events.
-- **Settings**: the persisted hotkey and pinned-window position stored under `%APPDATA%\TranslatorLite`.
+- **Settings**: the persisted hotkey, pinned-window position, and window size stored under `%APPDATA%\TranslatorLite`.
 - **Selection Capture**: obtains selected text through UI Automation, with a clipboard shortcut fallback.
 - **Windows Adapters**: native implementations for global hotkeys, mouse hooks, selection, monitor geometry, and the system tray.
 - **Web Tester**: a local-only HTTP interface used to exercise the Translation Client from a browser.

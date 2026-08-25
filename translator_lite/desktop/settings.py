@@ -19,6 +19,7 @@ class AppSettings:
     hotkey: HotkeySpec
     position_pinned: bool = False
     window_position: tuple[int, int] | None = None
+    window_size: tuple[int, int] | None = None
 
 
 def settings_from_payload(payload: object) -> AppSettings:
@@ -45,7 +46,23 @@ def settings_from_payload(payload: object) -> AppSettings:
             position = (x, y)
 
     position_pinned = payload.get("position_pinned") is True and position is not None
-    return AppSettings(hotkey, position_pinned, position)
+
+    raw_size = payload.get("window_size")
+    window_size: tuple[int, int] | None = None
+    if isinstance(raw_size, dict):
+        width = raw_size.get("width")
+        height = raw_size.get("height")
+        if (
+            isinstance(width, int)
+            and not isinstance(width, bool)
+            and width > 0
+            and isinstance(height, int)
+            and not isinstance(height, bool)
+            and height > 0
+        ):
+            window_size = (width, height)
+
+    return AppSettings(hotkey, position_pinned, position, window_size)
 
 
 def settings_to_payload(settings: AppSettings) -> dict[str, object]:
@@ -55,10 +72,17 @@ def settings_to_payload(settings: AppSettings) -> dict[str, object]:
             "x": settings.window_position[0],
             "y": settings.window_position[1],
         }
+    window_size = None
+    if settings.window_size is not None:
+        window_size = {
+            "width": settings.window_size[0],
+            "height": settings.window_size[1],
+        }
     return {
         "hotkey": settings.hotkey.to_dict(),
         "position_pinned": settings.position_pinned,
         "window_position": position,
+        "window_size": window_size,
     }
 
 
