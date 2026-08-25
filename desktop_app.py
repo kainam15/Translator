@@ -74,6 +74,68 @@ HOTKEY_FALLBACKS = (
 )
 
 
+@dataclass(frozen=True)
+class AppSettings:
+    hotkey: HotkeySpec
+    position_pinned: bool = False
+    window_position: tuple[int, int] | None = None
+
+
+def settings_from_payload(payload: object) -> AppSettings:
+    """Parse settings defensively and keep old hotkey-only files compatible."""
+    if not isinstance(payload, dict):
+        return AppSettings(DEFAULT_HOTKEY)
+
+    try:
+        hotkey = HotkeySpec.from_dict(payload.get("hotkey"))
+    except ValueError:
+        hotkey = DEFAULT_HOTKEY
+
+    raw_position = payload.get("window_position")
+    position: tuple[int, int] | None = None
+    if isinstance(raw_position, dict):
+        x = raw_position.get("x")
+        y = raw_position.get("y")
+        if (
+            isinstance(x, int)
+            and not isinstance(x, bool)
+            and isinstance(y, int)
+            and not isinstance(y, bool)
+        ):
+            position = (x, y)
+
+    position_pinned = payload.get("position_pinned") is True and position is not None
+    return AppSettings(hotkey, position_pinned, position)
+
+
+def settings_to_payload(settings: AppSettings) -> dict[str, object]:
+    position = None
+    if settings.window_position is not None:
+        position = {
+            "x": settings.window_position[0],
+            "y": settings.window_position[1],
+        }
+    return {
+        "hotkey": settings.hotkey.to_dict(),
+        "position_pinned": settings.position_pinned,
+        "window_position": position,
+    }
+
+
+def clamp_window_position(
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+    work_area: tuple[int, int, int, int],
+) -> tuple[int, int]:
+    """Keep the complete window inside the selected monitor's work area."""
+    left, top, right, bottom = work_area
+    max_x = max(left, right - width)
+    max_y = max(top, bottom - height)
+    return max(left, min(x, max_x)), max(top, min(y, max_y))
+
+
 def enable_dpi_awareness() -> None:
     """Keep Tk dimensions crisp on Windows high-DPI displays."""
     if not hasattr(ctypes, "windll"):
@@ -87,22 +149,35 @@ def enable_dpi_awareness() -> None:
             pass
 
 
-def load_hotkey() -> HotkeySpec:
+def load_settings() -> AppSettings:
     try:
         payload = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        return HotkeySpec.from_dict(payload.get("hotkey"))
-    except (OSError, ValueError, json.JSONDecodeError):
-        return DEFAULT_HOTKEY
+        return settings_from_payload(payload)
+    except (OSError, json.JSONDecodeError):
+        return AppSettings(DEFAULT_HOTKEY)
 
 
-def save_hotkey(spec: HotkeySpec) -> None:
+def save_settings(settings: AppSettings) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     temp_file = CONFIG_FILE.with_suffix(".tmp")
     temp_file.write_text(
-        json.dumps({"hotkey": spec.to_dict()}, ensure_ascii=False, indent=2),
+        json.dumps(settings_to_payload(settings), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     temp_file.replace(CONFIG_FILE)
+
+
+def load_hotkey() -> HotkeySpec:
+    """Backward-compatible helper retained for callers of the earlier version."""
+    return load_settings().hotkey
+
+
+def save_hotkey(spec: HotkeySpec) -> None:
+    """Update only the hotkey while preserving position-pin settings."""
+    settings = load_settings()
+    save_settings(
+        AppSettings(spec, settings.position_pinned, settings.window_position)
+    )
 
 
 class HotkeySettingsDialog:
@@ -317,7 +392,6 @@ class TranslatorApp:
     def __init__(self, root: tk.Tk, *, decorated: bool = False) -> None:
         self.root = root
         self._decorated = decorated
-        self._topmost = True
         self._drag_offset = (0, 0)
         self._placeholder_active = True
         self._busy = False
@@ -326,7 +400,10 @@ class TranslatorApp:
         self._capture_pending = False
         self._clipboard_sequence = 0
         self._clipboard_deadline = 0.0
-        self.hotkey_spec = load_hotkey()
+        settings = load_settings()
+        self.hotkey_spec = settings.hotkey
+        self._position_pinned = settings.position_pinned
+        self._fixed_position = settings.window_position
         self._hotkey_events: queue.Queue[str] = queue.Queue()
         self._hotkey_manager = GlobalHotkey(self._hotkey_events)
         self._tray_events: queue.Queue[str] = queue.Queue()
@@ -354,9 +431,12 @@ class TranslatorApp:
         self.root.attributes("-topmost", True)
         self.root.minsize(440, 500)
 
-        screen_width = self.root.winfo_screenwidth()
-        x = max(20, screen_width - self.WIDTH - 42)
-        self.root.geometry(f"{self.WIDTH}x{self.HEIGHT}+{x}+54")
+        if self._position_pinned and self._fixed_position is not None:
+            x, y = self._bounded_position(*self._fixed_position)
+        else:
+            screen_width = self.root.winfo_screenwidth()
+            x, y = max(20, screen_width - self.WIDTH - 42), 54
+        self.root.geometry(f"{self.WIDTH}x{self.HEIGHT}+{x}+{y}")
         self.root.protocol("WM_DELETE_WINDOW", self.hide_window)
         if not self._decorated:
             self.root.after(20, self._apply_windows_rounding)
@@ -433,13 +513,17 @@ class TranslatorApp:
 
         self.pin_button = self._flat_button(
             titlebar,
-            "置顶 ✓",
-            self.toggle_topmost,
-            fg=COLORS["blue"],
-            bg=COLORS["blue_soft"],
-            padx=9,
+            "\ue718",
+            self.toggle_position_pin,
+            fg=COLORS["muted"],
+            bg=COLORS["window"],
+            active_bg=COLORS["blue_soft"],
+            padx=0,
+            width=3,
         )
+        self.pin_button.configure(font=("Segoe MDL2 Assets", 11))
         self.pin_button.pack(side="left", padx=(0, 8), pady=4)
+        self._update_position_pin_style()
 
         title = tk.Label(
             titlebar,
@@ -475,6 +559,7 @@ class TranslatorApp:
         for widget in (titlebar, title):
             widget.bind("<ButtonPress-1>", self._start_drag)
             widget.bind("<B1-Motion>", self._drag_window)
+            widget.bind("<ButtonRelease-1>", self._finish_drag)
 
     def _build_input_card(self, parent: tk.Widget) -> None:
         card = tk.Frame(
@@ -711,16 +796,97 @@ class TranslatorApp:
         y = event.y_root - self._drag_offset[1]
         self.root.geometry(f"+{x}+{y}")
 
-    def toggle_topmost(self) -> None:
-        self._topmost = not self._topmost
-        self.root.attributes("-topmost", self._topmost)
-        if self._topmost:
+    def _window_size(self) -> tuple[int, int]:
+        self.root.update_idletasks()
+        return (
+            max(self.WIDTH, self.root.winfo_width()),
+            max(self.HEIGHT, self.root.winfo_height()),
+        )
+
+    def _bounded_position(self, x: int, y: int) -> tuple[int, int]:
+        width, height = self._window_size()
+        return clamp_window_position(
+            x,
+            y,
+            width,
+            height,
+            work_area_for_point(x, y),
+        )
+
+    def _place_window(self, x: int, y: int) -> None:
+        # Tk accepts "+-100" for a negative virtual-screen coordinate.
+        self.root.geometry(f"+{x}+{y}")
+
+    def _place_at_fixed_position(self) -> bool:
+        if not self._position_pinned or self._fixed_position is None:
+            return False
+        self._place_window(*self._bounded_position(*self._fixed_position))
+        return True
+
+    def _current_settings(self) -> AppSettings:
+        return AppSettings(
+            self.hotkey_spec,
+            self._position_pinned,
+            self._fixed_position,
+        )
+
+    def _persist_settings(self) -> None:
+        save_settings(self._current_settings())
+
+    def _update_position_pin_style(self) -> None:
+        if self._position_pinned:
             self.pin_button.configure(
-                text="置顶 ✓", fg=COLORS["blue"], bg=COLORS["blue_soft"]
+                fg=COLORS["blue"],
+                bg=COLORS["blue_soft"],
+                activeforeground=COLORS["blue"],
+                activebackground="#D9E5FF",
             )
         else:
             self.pin_button.configure(
-                text="置顶", fg=COLORS["muted"], bg=COLORS["window"]
+                fg=COLORS["muted"],
+                bg=COLORS["window"],
+                activeforeground=COLORS["blue"],
+                activebackground=COLORS["blue_soft"],
+            )
+
+    def toggle_position_pin(self) -> None:
+        self._position_pinned = not self._position_pinned
+        if self._position_pinned:
+            self._fixed_position = self._bounded_position(
+                self.root.winfo_x(), self.root.winfo_y()
+            )
+            self._place_window(*self._fixed_position)
+        self._update_position_pin_style()
+
+        try:
+            self._persist_settings()
+        except OSError as exc:
+            self.footer_status.configure(
+                text=f"位置状态已生效，但设置无法保存: {exc}",
+                fg=COLORS["danger"],
+            )
+            return
+
+        message = (
+            "窗口位置已固定；拖动后会自动更新"
+            if self._position_pinned
+            else "已取消位置固定；下次划词将跟随鼠标"
+        )
+        self.footer_status.configure(text=message, fg=COLORS["muted"])
+
+    def _finish_drag(self, _event: tk.Event[tk.Misc] | None = None) -> None:
+        if not self._position_pinned:
+            return
+        self._fixed_position = self._bounded_position(
+            self.root.winfo_x(), self.root.winfo_y()
+        )
+        self._place_window(*self._fixed_position)
+        try:
+            self._persist_settings()
+        except OSError as exc:
+            self.footer_status.configure(
+                text=f"新位置已生效，但设置无法保存: {exc}",
+                fg=COLORS["danger"],
             )
 
     def apply_hotkey(
@@ -740,7 +906,7 @@ class TranslatorApp:
         warning: str | None = None
         if persist:
             try:
-                save_hotkey(spec)
+                self._persist_settings()
             except OSError as exc:
                 warning = f"快捷键已生效，但设置无法保存: {exc}"
 
@@ -792,8 +958,9 @@ class TranslatorApp:
         return "break"
 
     def show_window(self) -> None:
+        self._place_at_fixed_position()
         self.root.deiconify()
-        self.root.attributes("-topmost", self._topmost)
+        self.root.attributes("-topmost", True)
         self.root.lift()
         self.root.after(40, self.source_text.focus_set)
 
@@ -824,22 +991,22 @@ class TranslatorApp:
 
     def _show_near_cursor(self) -> None:
         cursor_x, cursor_y = cursor_position()
-        left, top, right, bottom = work_area_for_point(cursor_x, cursor_y)
-        self.root.update_idletasks()
-        width = max(self.WIDTH, self.root.winfo_width())
-        height = max(self.HEIGHT, self.root.winfo_height())
-        margin = 18
-        x = cursor_x + margin
-        y = cursor_y + margin
-        if x + width > right:
-            x = cursor_x - width - margin
-        if y + height > bottom:
-            y = cursor_y - height - margin
-        x = max(left, min(x, right - width))
-        y = max(top, min(y, bottom - height))
-        self.root.geometry(f"+{x}+{y}")
+        if not self._place_at_fixed_position():
+            left, top, right, bottom = work_area_for_point(cursor_x, cursor_y)
+            width, height = self._window_size()
+            margin = 18
+            x = cursor_x + margin
+            y = cursor_y + margin
+            if x + width > right:
+                x = cursor_x - width - margin
+            if y + height > bottom:
+                y = cursor_y - height - margin
+            x, y = clamp_window_position(
+                x, y, width, height, (left, top, right, bottom)
+            )
+            self._place_window(x, y)
         self.root.deiconify()
-        self.root.attributes("-topmost", self._topmost)
+        self.root.attributes("-topmost", True)
         self.root.lift()
         self.root.after(40, self.source_text.focus_set)
 
