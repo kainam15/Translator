@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import ctypes
-from ctypes import wintypes
 import json
 import os
 import queue
@@ -26,6 +25,7 @@ from windows_hotkey import (
     send_copy_shortcut,
     work_area_for_point,
 )
+from windows_mouse import GlobalMouseClick, window_at_point_is_current_process
 from windows_selection import get_selected_text_by_automation
 from windows_tray import SystemTray
 
@@ -156,35 +156,6 @@ def enable_dpi_awareness() -> None:
             ctypes.windll.user32.SetProcessDPIAware()
         except (AttributeError, OSError):
             pass
-
-
-def _foreground_window_is_current_process() -> bool | None:
-    """Report whether the Windows foreground window belongs to this process."""
-    if not hasattr(ctypes, "windll"):
-        return None
-    try:
-        user32 = ctypes.windll.user32
-        get_foreground_window = user32.GetForegroundWindow
-        get_foreground_window.argtypes = ()
-        get_foreground_window.restype = wintypes.HWND
-        get_window_thread_process_id = user32.GetWindowThreadProcessId
-        get_window_thread_process_id.argtypes = (
-            wintypes.HWND,
-            ctypes.POINTER(wintypes.DWORD),
-        )
-        get_window_thread_process_id.restype = wintypes.DWORD
-
-        foreground_window = get_foreground_window()
-        if not foreground_window:
-            return None
-        process_id = wintypes.DWORD()
-        if not get_window_thread_process_id(
-            foreground_window, ctypes.byref(process_id)
-        ):
-            return None
-        return process_id.value == os.getpid()
-    except (AttributeError, OSError):
-        return None
 
 
 def load_settings() -> AppSettings:
@@ -458,6 +429,8 @@ class TranslatorApp:
         self._icon_path = resource_path("assets/translator_icon.ico")
         self._hotkey_events: queue.Queue[str] = queue.Queue()
         self._hotkey_manager = GlobalHotkey(self._hotkey_events)
+        self._mouse_events: queue.Queue[tuple[int, int]] = queue.Queue()
+        self._mouse_monitor = GlobalMouseClick(self._mouse_events)
         self._tray_events: queue.Queue[str] = queue.Queue()
         self._tray = SystemTray(self._tray_events, icon_path=self._icon_path)
         self._settings_dialog: HotkeySettingsDialog | None = None
@@ -472,9 +445,11 @@ class TranslatorApp:
         self._set_placeholder()
         self._initialize_hotkey()
         self._initialize_tray()
+        self._initialize_mouse_monitor()
         self._poll_results()
         self._poll_hotkey_events()
         self._poll_tray_events()
+        self._poll_mouse_events()
 
     def _configure_window(self) -> None:
         self.root.title("Translator")
@@ -495,7 +470,6 @@ class TranslatorApp:
             x, y = max(20, screen_width - self.WIDTH - 42), 54
         self.root.geometry(f"{self.WIDTH}x{self.HEIGHT}+{x}+{y}")
         self.root.protocol("WM_DELETE_WINDOW", self.hide_window)
-        self.root.bind("<FocusOut>", self._on_window_focus_out, add="+")
         if not self._decorated:
             self.root.after(20, self._apply_windows_rounding)
 
@@ -1011,34 +985,6 @@ class TranslatorApp:
         self._hotkey_manager.stop()
         self._settings_dialog = HotkeySettingsDialog(self)
 
-    def _on_window_focus_out(
-        self, _event: tk.Event[tk.Misc] | None = None
-    ) -> None:
-        # FocusOut is delivered before Tk has finished assigning the new focus.
-        # A short delay lets Windows finish that handoff, so moving between this
-        # window and its settings dialog is not mistaken for an outside click.
-        self.root.after(20, self._hide_if_window_inactive)
-
-    def _hide_if_window_inactive(self) -> None:
-        if self._closed:
-            return
-        try:
-            if self.root.state() == "withdrawn":
-                return
-        except tk.TclError:
-            return
-
-        foreground_is_ours = _foreground_window_is_current_process()
-        if foreground_is_ours is True:
-            return
-        if foreground_is_ours is None:
-            try:
-                if self.root.focus_get() is not None:
-                    return
-            except tk.TclError:
-                return
-        self.hide_window()
-
     def hide_window(self) -> str:
         self.root.withdraw()
         return "break"
@@ -1057,6 +1003,51 @@ class TranslatorApp:
                 text=error or "系统托盘启动失败", fg=COLORS["danger"]
             )
 
+    def _initialize_mouse_monitor(self) -> None:
+        success, error = self._mouse_monitor.start()
+        if not success:
+            self.footer_status.configure(
+                text=error or "点击窗口外自动隐藏不可用",
+                fg=COLORS["danger"],
+            )
+
+    def _settings_window_is_open(self) -> bool:
+        dialog = self._settings_dialog
+        if dialog is None:
+            return False
+        try:
+            return bool(dialog.window.winfo_exists())
+        except tk.TclError:
+            return False
+
+    def _handle_global_mouse_click(self, x: int, y: int) -> None:
+        if self._closed or self._settings_window_is_open():
+            return
+        try:
+            if self.root.state() == "withdrawn":
+                return
+        except tk.TclError:
+            return
+        if window_at_point_is_current_process(x, y) is False:
+            self.hide_window()
+
+    def _poll_mouse_events(self) -> None:
+        if self._closed:
+            return
+        try:
+            while True:
+                self._handle_global_mouse_click(*self._mouse_events.get_nowait())
+        except queue.Empty:
+            pass
+        self.root.after(20, self._poll_mouse_events)
+
+    def _discard_mouse_events(self) -> None:
+        try:
+            while True:
+                self._mouse_events.get_nowait()
+        except queue.Empty:
+            pass
+
     def _poll_tray_events(self) -> None:
         if self._closed:
             return
@@ -1064,8 +1055,10 @@ class TranslatorApp:
             while True:
                 event = self._tray_events.get_nowait()
                 if event == "show":
+                    self._discard_mouse_events()
                     self.show_window()
                 elif event == "settings":
+                    self._discard_mouse_events()
                     self.show_window()
                     self.open_settings()
                 elif event == "exit":
@@ -1356,6 +1349,7 @@ class TranslatorApp:
     def exit_app(self) -> None:
         self._closed = True
         self._hotkey_manager.stop()
+        self._mouse_monitor.stop()
         self._tray.stop()
         self.root.destroy()
 
