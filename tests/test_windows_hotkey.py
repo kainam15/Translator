@@ -1,7 +1,12 @@
 import ctypes
 import unittest
 
-from translator_lite.windows.hotkey import DEFAULT_HOTKEY, INPUT, HotkeySpec
+from translator_lite.windows.hotkey import (
+    DEFAULT_HOTKEY,
+    DEFAULT_OCR_HOTKEY,
+    INPUT,
+    HotkeySpec,
+)
 
 
 class HotkeySpecTests(unittest.TestCase):
@@ -11,6 +16,7 @@ class HotkeySpecTests(unittest.TestCase):
 
     def test_default_hotkey(self) -> None:
         self.assertEqual(DEFAULT_HOTKEY.display, "Alt+W")
+        self.assertEqual(DEFAULT_OCR_HOTKEY.display, "Alt+Q")
 
     def test_normalizes_order_and_key(self) -> None:
         spec = HotkeySpec(("Shift", "Ctrl"), "k")

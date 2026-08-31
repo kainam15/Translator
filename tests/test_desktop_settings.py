@@ -9,7 +9,11 @@ from translator_lite.desktop.settings import (
     settings_from_payload,
     settings_to_payload,
 )
-from translator_lite.windows.hotkey import DEFAULT_HOTKEY, HotkeySpec
+from translator_lite.windows.hotkey import (
+    DEFAULT_HOTKEY,
+    DEFAULT_OCR_HOTKEY,
+    HotkeySpec,
+)
 
 
 class DesktopSettingsTests(unittest.TestCase):
@@ -19,6 +23,7 @@ class DesktopSettingsTests(unittest.TestCase):
         )
 
         self.assertEqual(settings.hotkey.display, "Ctrl+Alt+T")
+        self.assertEqual(settings.ocr_hotkey, DEFAULT_OCR_HOTKEY)
         self.assertFalse(settings.position_pinned)
         self.assertIsNone(settings.window_position)
         self.assertIsNone(settings.window_size)
@@ -29,6 +34,7 @@ class DesktopSettingsTests(unittest.TestCase):
             position_pinned=True,
             window_position=(-720, 84),
             window_size=(880, 720),
+            ocr_hotkey=HotkeySpec(("Ctrl", "Shift"), "Q"),
         )
 
         restored = settings_from_payload(settings_to_payload(original))
@@ -63,6 +69,7 @@ class DesktopSettingsTests(unittest.TestCase):
             position_pinned=True,
             window_position=(100, 200),
             window_size=(760, 680),
+            ocr_hotkey=HotkeySpec(("Alt", "Shift"), "Q"),
         )
         with TemporaryDirectory() as directory:
             path = Path(directory) / "nested" / "settings.json"
@@ -70,6 +77,16 @@ class DesktopSettingsTests(unittest.TestCase):
             save_settings(original, path)
 
             self.assertEqual(load_settings(path), original)
+
+    def test_invalid_ocr_hotkey_falls_back_to_default(self) -> None:
+        settings = settings_from_payload(
+            {
+                "hotkey": DEFAULT_HOTKEY.to_dict(),
+                "ocr_hotkey": {"modifiers": [], "key": "Q"},
+            }
+        )
+
+        self.assertEqual(settings.ocr_hotkey, DEFAULT_OCR_HOTKEY)
 
     def test_invalid_json_falls_back_to_defaults(self) -> None:
         with TemporaryDirectory() as directory:

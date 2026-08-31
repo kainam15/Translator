@@ -15,7 +15,7 @@ from tkinter import ttk
 
 from ..client import GoogleTranslateError, TranslationResult, translate
 from ..windows.hotkey import (
-    DEFAULT_HOTKEY,
+    OCR_HOTKEY_ID,
     GlobalHotkey,
     HotkeySpec,
     clipboard_sequence_number,
@@ -24,10 +24,12 @@ from ..windows.hotkey import (
     work_area_for_point,
 )
 from ..windows.mouse import GlobalMouseClick, window_at_point_is_current_process
+from ..windows.ocr import ScreenRegion, WindowsOcrError, recognize_screen_region
 from ..windows.selection import get_selected_text_by_automation
 from ..windows.tray import SystemTray
 from ..windows.window import redraw_window, set_window_bounds, set_window_position
 from .placement import clamp_window_position, resize_window_geometry, scale_for_dpi
+from .ocr_overlay import OcrRegionSelector
 from .settings import AppSettings, load_settings, save_settings
 from .theme import (
     COLORS,
@@ -72,6 +74,10 @@ HOTKEY_FALLBACKS = (
     HotkeySpec(("Alt", "Shift"), "W"),
     HotkeySpec(("Ctrl", "Alt"), "T"),
 )
+OCR_HOTKEY_FALLBACKS = (
+    HotkeySpec(("Alt", "Shift"), "Q"),
+    HotkeySpec(("Ctrl", "Alt"), "O"),
+)
 
 
 def resource_path(relative_path: str) -> Path:
@@ -109,7 +115,7 @@ def enable_dpi_awareness() -> None:
 
 
 class HotkeySettingsDialog:
-    """Compact recorder for the global selection-translate shortcut."""
+    """Compact recorder for selection-translate and screen-OCR shortcuts."""
 
     CTRL_MASK = 0x0004
     SHIFT_MASK = 0x0001
@@ -118,8 +124,14 @@ class HotkeySettingsDialog:
 
     def __init__(self, app: "TranslatorApp") -> None:
         self.app = app
-        self.candidate = app.hotkey_spec
-        self.recording = False
+        self.candidates = {
+            "translation": app.hotkey_spec,
+            "ocr": app.ocr_hotkey_spec,
+        }
+        self.recording_kind: str | None = None
+        self._instructions: dict[str, tk.Label] = {}
+        self._hotkey_labels: dict[str, tk.Label] = {}
+        self._record_buttons: dict[str, tk.Button] = {}
         self._finished = False
 
         self.window = tk.Toplevel(app.root)
@@ -163,60 +175,15 @@ class HotkeySettingsDialog:
             font=FONTS["heading"],
         ).pack(anchor="w", padx=20, pady=(18, 12))
 
-        row = tk.Frame(self.window, bg=COLORS["sunken"])
-        row.pack(fill="x", padx=20)
-
-        tk.Label(
-            row,
-            text="划词翻译",
-            bg=COLORS["sunken"],
-            fg=COLORS["text"],
-            font=FONTS["label"],
-        ).pack(side="left", padx=16, pady=22)
-
-        recorder = tk.Frame(
-            row,
-            bg=COLORS["surface"],
-            highlightthickness=1,
-            highlightbackground=COLORS["line_strong"],
-        )
-        recorder.pack(side="right", fill="x", expand=True, padx=12, pady=12)
-
-        labels = tk.Frame(recorder, bg=COLORS["surface"])
-        labels.pack(side="left", fill="both", expand=True, padx=12, pady=7)
-        self.instruction = tk.Label(
-            labels,
-            text="点击录制，然后按下新快捷键",
-            bg=COLORS["surface"],
-            fg=COLORS["muted"],
-            font=FONTS["caption"],
-            anchor="w",
-        )
-        self.instruction.pack(fill="x")
-        self.hotkey_label = tk.Label(
-            labels,
-            text=self.candidate.display,
-            bg=COLORS["surface"],
-            fg=COLORS["text"],
-            font=KEYCAP_FONT,
-            anchor="w",
-        )
-        self.hotkey_label.pack(fill="x")
-
-        self.record_button = flat_button(
-            recorder,
-            "录制",
-            self.begin_recording,
-            kind="quiet",
-            bg=COLORS["surface"],
-            padx=14,
-            pady=8,
-        )
-        self.record_button.pack(side="right", padx=8, pady=8)
+        self._build_recorder_row("translation", "划词翻译")
+        self._build_recorder_row("ocr", "OCR 翻译")
 
         self.error_label = tk.Label(
             self.window,
-            text="划词内容会复制到剪贴板，并发送给 Google Translate。",
+            text=(
+                "OCR 使用 Windows 本地识别；识别文字与划词内容一样会发送给 "
+                "Google Translate。"
+            ),
             bg=COLORS["raised"],
             fg=COLORS["muted"],
             font=FONTS["caption"],
@@ -241,16 +208,89 @@ class HotkeySettingsDialog:
             pady=7,
         ).pack(side="right", padx=(0, 8))
 
-    def begin_recording(self) -> None:
-        self.recording = True
-        self.instruction.configure(text="请按下组合键…", fg=COLORS["accent"])
-        self.hotkey_label.configure(text="等待按键")
-        self.record_button.configure(text="录制中…", state="disabled")
+    def _build_recorder_row(self, kind: str, label: str) -> None:
+        row = tk.Frame(self.window, bg=COLORS["sunken"])
+        row.pack(fill="x", padx=20, pady=(0, 8))
+
+        tk.Label(
+            row,
+            text=label,
+            width=9,
+            bg=COLORS["sunken"],
+            fg=COLORS["text"],
+            font=FONTS["label"],
+            anchor="w",
+        ).pack(side="left", padx=(16, 4), pady=22)
+
+        recorder = tk.Frame(
+            row,
+            bg=COLORS["surface"],
+            highlightthickness=1,
+            highlightbackground=COLORS["line_strong"],
+        )
+        recorder.pack(side="right", fill="x", expand=True, padx=12, pady=12)
+
+        labels = tk.Frame(recorder, bg=COLORS["surface"])
+        labels.pack(side="left", fill="both", expand=True, padx=12, pady=7)
+        instruction = tk.Label(
+            labels,
+            text="点击录制，然后按下新快捷键",
+            bg=COLORS["surface"],
+            fg=COLORS["muted"],
+            font=FONTS["caption"],
+            anchor="w",
+        )
+        instruction.pack(fill="x")
+        hotkey_label = tk.Label(
+            labels,
+            text=self.candidates[kind].display,
+            bg=COLORS["surface"],
+            fg=COLORS["text"],
+            font=KEYCAP_FONT,
+            anchor="w",
+        )
+        hotkey_label.pack(fill="x")
+
+        record_button = flat_button(
+            recorder,
+            "录制",
+            lambda selected_kind=kind: self.begin_recording(selected_kind),
+            kind="quiet",
+            bg=COLORS["surface"],
+            padx=14,
+            pady=8,
+        )
+        record_button.pack(side="right", padx=8, pady=8)
+        self._instructions[kind] = instruction
+        self._hotkey_labels[kind] = hotkey_label
+        self._record_buttons[kind] = record_button
+
+    def begin_recording(self, kind: str = "translation") -> None:
+        if kind not in self.candidates:
+            raise ValueError(f"未知快捷键类型: {kind}")
+        previous_kind = self.recording_kind
+        if previous_kind and previous_kind != kind:
+            self._instructions[previous_kind].configure(
+                text="点击录制，然后按下新快捷键", fg=COLORS["muted"]
+            )
+            self._hotkey_labels[previous_kind].configure(
+                text=self.candidates[previous_kind].display
+            )
+            self._record_buttons[previous_kind].configure(
+                text="录制", state="normal"
+            )
+        self.recording_kind = kind
+        self._instructions[kind].configure(
+            text="请按下组合键…", fg=COLORS["accent"]
+        )
+        self._hotkey_labels[kind].configure(text="等待按键")
+        self._record_buttons[kind].configure(text="录制中…", state="disabled")
         self.error_label.configure(text="至少包含 Ctrl、Alt、Shift 之一。", fg=COLORS["muted"])
         self.window.focus_force()
 
     def _on_key_press(self, event: tk.Event[tk.Misc]) -> str | None:
-        if not self.recording:
+        kind = self.recording_kind
+        if kind is None:
             return None
         keysym = str(event.keysym)
         if keysym in {
@@ -272,22 +312,35 @@ class HotkeySettingsDialog:
             modifiers.append("Shift")
 
         try:
-            self.candidate = HotkeySpec(tuple(modifiers), keysym)
+            candidate = HotkeySpec(tuple(modifiers), keysym)
         except ValueError as exc:
             self.error_label.configure(text=str(exc), fg=COLORS["danger"])
             return "break"
 
-        self.recording = False
-        self.instruction.configure(text="新快捷键", fg=COLORS["muted"])
-        self.hotkey_label.configure(text=self.candidate.display)
-        self.record_button.configure(text="重新录制", state="normal")
+        other_kind = "ocr" if kind == "translation" else "translation"
+        if candidate == self.candidates[other_kind]:
+            self.error_label.configure(
+                text="划词翻译和 OCR 翻译不能使用相同快捷键",
+                fg=COLORS["danger"],
+            )
+            return "break"
+
+        self.candidates[kind] = candidate
+        self.recording_kind = None
+        self._instructions[kind].configure(text="新快捷键", fg=COLORS["muted"])
+        self._hotkey_labels[kind].configure(text=candidate.display)
+        self._record_buttons[kind].configure(text="重新录制", state="normal")
         self.error_label.configure(
             text="点击确定后立即生效。", fg=COLORS["muted"]
         )
         return "break"
 
     def confirm(self) -> None:
-        success, message = self.app.apply_hotkey(self.candidate, persist=True)
+        success, message = self.app.apply_hotkeys(
+            self.candidates["translation"],
+            self.candidates["ocr"],
+            persist=True,
+        )
         if not success:
             self.error_label.configure(text=message or "快捷键设置失败", fg=COLORS["danger"])
             return
@@ -298,7 +351,11 @@ class HotkeySettingsDialog:
     def cancel(self) -> None:
         if self._finished:
             return
-        self.app.apply_hotkey(self.app.hotkey_spec, persist=False)
+        self.app.apply_hotkeys(
+            self.app.hotkey_spec,
+            self.app.ocr_hotkey_spec,
+            persist=False,
+        )
         self._finished = True
         self.window.destroy()
         self.app._settings_dialog = None
@@ -326,18 +383,32 @@ class TranslatorApp:
         self._request_id = 0
         self._closed = False
         self._capture_pending = False
+        self._ocr_pending = False
+        self._ocr_restore_on_cancel = False
+        self._ocr_selector: OcrRegionSelector | None = None
         self._clipboard_sequence = 0
         self._clipboard_deadline = 0.0
         self._progress_offset = -MARQUEE_SPAN
         self._progress_running = False
         settings = load_settings()
         self.hotkey_spec = settings.hotkey
+        self.ocr_hotkey_spec = settings.ocr_hotkey
         self._position_pinned = settings.position_pinned
         self._fixed_position = settings.window_position
         self._saved_window_size = settings.window_size
         self._icon_path = resource_path("assets/translator_icon.ico")
         self._hotkey_events: queue.Queue[str] = queue.Queue()
-        self._hotkey_manager = GlobalHotkey(self._hotkey_events)
+        self._hotkey_manager = GlobalHotkey(
+            self._hotkey_events,
+            event_name="translate",
+            thread_name="TranslatorSelectionHotkey",
+        )
+        self._ocr_hotkey_manager = GlobalHotkey(
+            self._hotkey_events,
+            event_name="ocr",
+            hotkey_id=OCR_HOTKEY_ID,
+            thread_name="TranslatorOcrHotkey",
+        )
         self._mouse_events: queue.Queue[tuple[int, int]] = queue.Queue()
         self._mouse_monitor = GlobalMouseClick(self._mouse_events)
         self._tray_events: queue.Queue[str] = queue.Queue()
@@ -346,6 +417,7 @@ class TranslatorApp:
         self._results: queue.Queue[tuple[int, TranslationResult | None, str | None]] = (
             queue.Queue()
         )
+        self._ocr_results: queue.Queue[tuple[str | None, str | None]] = queue.Queue()
 
         self._configure_window()
         self._configure_styles()
@@ -356,6 +428,7 @@ class TranslatorApp:
         self._initialize_tray()
         self._initialize_mouse_monitor()
         self._poll_results()
+        self._poll_ocr_results()
         self._poll_hotkey_events()
         self._poll_tray_events()
         self._poll_mouse_events()
@@ -415,6 +488,11 @@ class TranslatorApp:
         if not self._decorated:
             self.root.after(20, self._apply_windows_rounding)
 
+    def _set_automation_state(self, state: str) -> None:
+        """Expose non-sensitive OCR state only in decorated UI test mode."""
+        if self._decorated:
+            self.root.title(f"Translator [{state}]")
+
     def _apply_windows_rounding(self) -> None:
         """Ask Windows 11 for rounded corners; safely ignored elsewhere."""
         if not hasattr(ctypes, "windll"):
@@ -446,7 +524,7 @@ class TranslatorApp:
 
         self.footer_status = tk.Label(
             self.surface,
-            text=f"就绪  ·  {self.hotkey_spec.display} 划词  ·  Ctrl+Enter 翻译",
+            text=self._ready_status(),
             bg=COLORS["raised"],
             fg=COLORS["muted"],
             font=FONTS["caption"],
@@ -882,6 +960,13 @@ class TranslatorApp:
             self._position_pinned,
             self._fixed_position,
             self._window_size(),
+            self.ocr_hotkey_spec,
+        )
+
+    def _ready_status(self, prefix: str = "就绪") -> str:
+        return (
+            f"{prefix}  ·  {self.hotkey_spec.display} 划词  ·  "
+            f"{self.ocr_hotkey_spec.display} OCR  ·  Ctrl+Enter 翻译"
         )
 
     def _persist_settings(self) -> None:
@@ -936,17 +1021,55 @@ class TranslatorApp:
     def apply_hotkey(
         self, spec: HotkeySpec, *, persist: bool
     ) -> tuple[bool, str | None]:
-        previous = self.hotkey_spec
-        success, error = self._hotkey_manager.start(spec)
-        if not success:
-            if spec != previous:
-                self._hotkey_manager.start(previous)
-            self.footer_status.configure(
-                text=error or "全局快捷键注册失败", fg=COLORS["danger"]
-            )
-            return False, error
+        """Backward-compatible wrapper for changing only the selection hotkey."""
+        return self.apply_hotkeys(spec, self.ocr_hotkey_spec, persist=persist)
 
-        self.hotkey_spec = spec
+    def _start_hotkey_pair(
+        self,
+        translation_spec: HotkeySpec,
+        ocr_spec: HotkeySpec,
+    ) -> tuple[bool, str | None]:
+        self._hotkey_manager.stop()
+        self._ocr_hotkey_manager.stop()
+        success, error = self._hotkey_manager.start(translation_spec)
+        if not success:
+            return False, error
+        success, error = self._ocr_hotkey_manager.start(ocr_spec)
+        if not success:
+            self._hotkey_manager.stop()
+            return False, error
+        return True, None
+
+    def apply_hotkeys(
+        self,
+        translation_spec: HotkeySpec,
+        ocr_spec: HotkeySpec,
+        *,
+        persist: bool,
+    ) -> tuple[bool, str | None]:
+        if translation_spec == ocr_spec:
+            message = "划词翻译和 OCR 翻译不能使用相同快捷键"
+            self.footer_status.configure(text=message, fg=COLORS["danger"])
+            return False, message
+
+        previous_translation = self.hotkey_spec
+        previous_ocr = self.ocr_hotkey_spec
+        success, error = self._start_hotkey_pair(translation_spec, ocr_spec)
+        if not success:
+            restored, restore_error = self._start_hotkey_pair(
+                previous_translation, previous_ocr
+            )
+            message = error or "全局快捷键注册失败"
+            if not restored:
+                message = (
+                    f"{message}；原快捷键也未能恢复: "
+                    f"{restore_error or '未知错误'}"
+                )
+            self.footer_status.configure(text=message, fg=COLORS["danger"])
+            return False, message
+
+        self.hotkey_spec = translation_spec
+        self.ocr_hotkey_spec = ocr_spec
         warning: str | None = None
         if persist:
             try:
@@ -955,37 +1078,74 @@ class TranslatorApp:
                 warning = f"快捷键已生效，但设置无法保存: {exc}"
 
         self.footer_status.configure(
-            text=f"就绪  ·  {spec.display} 划词  ·  Ctrl+Enter 翻译",
+            text=self._ready_status(),
             fg=COLORS["muted"] if not warning else COLORS["danger"],
         )
         return True, warning
 
-    def _initialize_hotkey(self) -> None:
-        preferred = self.hotkey_spec
+    @staticmethod
+    def _start_available_hotkey(
+        manager: GlobalHotkey,
+        preferred: HotkeySpec,
+        fallbacks: tuple[HotkeySpec, ...],
+        *,
+        excluded: set[HotkeySpec] | None = None,
+    ) -> tuple[HotkeySpec | None, str | None]:
         last_error: str | None = None
-        seen: set[HotkeySpec] = set()
-        for candidate in (preferred, *HOTKEY_FALLBACKS):
+        seen: set[HotkeySpec] = set(excluded or ())
+        for candidate in (preferred, *fallbacks):
             if candidate in seen:
                 continue
             seen.add(candidate)
-            success, error = self._hotkey_manager.start(candidate)
+            success, error = manager.start(candidate)
             if success:
-                self.hotkey_spec = candidate
-                if candidate == preferred:
-                    self.footer_status.configure(
-                        text=f"就绪  ·  {candidate.display} 划词  ·  Ctrl+Enter 翻译",
-                        fg=COLORS["muted"],
-                    )
-                else:
-                    self.footer_status.configure(
-                        text=f"{preferred.display} 已占用，当前使用 {candidate.display}",
-                        fg=COLORS["accent"],
-                    )
-                return
+                return candidate, None
             last_error = error
+        return None, last_error
 
+    def _initialize_hotkey(self) -> None:
+        preferred_translation = self.hotkey_spec
+        preferred_ocr = self.ocr_hotkey_spec
+        translation, translation_error = self._start_available_hotkey(
+            self._hotkey_manager,
+            preferred_translation,
+            HOTKEY_FALLBACKS,
+        )
+        if translation is not None:
+            self.hotkey_spec = translation
+
+        ocr, ocr_error = self._start_available_hotkey(
+            self._ocr_hotkey_manager,
+            preferred_ocr,
+            OCR_HOTKEY_FALLBACKS,
+            excluded={translation} if translation is not None else None,
+        )
+        if ocr is not None:
+            self.ocr_hotkey_spec = ocr
+
+        errors: list[str] = []
+        if translation is None:
+            errors.append(translation_error or "没有可用的划词快捷键")
+        if ocr is None:
+            errors.append(ocr_error or "没有可用的 OCR 快捷键")
+        if errors:
+            self.footer_status.configure(
+                text="；".join(errors), fg=COLORS["danger"]
+            )
+            return
+
+        fallbacks: list[str] = []
+        if translation != preferred_translation:
+            fallbacks.append(
+                f"{preferred_translation.display} 已占用，划词改用 {translation.display}"
+            )
+        if ocr != preferred_ocr:
+            fallbacks.append(
+                f"{preferred_ocr.display} 已占用，OCR 改用 {ocr.display}"
+            )
         self.footer_status.configure(
-            text=last_error or "没有可用的全局快捷键", fg=COLORS["danger"]
+            text="；".join(fallbacks) if fallbacks else self._ready_status(),
+            fg=COLORS["accent"] if fallbacks else COLORS["muted"],
         )
 
     def open_settings(self) -> None:
@@ -995,6 +1155,7 @@ class TranslatorApp:
             self._settings_dialog.window.focus_force()
             return
         self._hotkey_manager.stop()
+        self._ocr_hotkey_manager.stop()
         self._settings_dialog = HotkeySettingsDialog(self)
 
     def hide_window(self) -> str:
@@ -1107,12 +1268,108 @@ class TranslatorApp:
         try:
             while True:
                 event = self._hotkey_events.get_nowait()
-                if event == "invoke" and not self._capture_pending:
+                if (
+                    event == "translate"
+                    and not self._capture_pending
+                    and not self._ocr_pending
+                ):
                     self._capture_pending = True
                     self.root.after(80, self._begin_selection_capture)
+                elif (
+                    event == "ocr"
+                    and not self._capture_pending
+                    and not self._ocr_pending
+                ):
+                    self._ocr_pending = True
+                    self.root.after(80, self._begin_ocr_capture)
         except queue.Empty:
             pass
         self.root.after(60, self._poll_hotkey_events)
+
+    def _begin_ocr_capture(self) -> None:
+        if self._closed or not self._ocr_pending:
+            return
+        self._set_automation_state("ocr-selecting")
+        self._ocr_restore_on_cancel = self.root.state() != "withdrawn"
+        self.root.withdraw()
+        self.root.update_idletasks()
+        self._discard_mouse_events()
+        self.root.after(100, self._show_ocr_selector)
+
+    def _show_ocr_selector(self) -> None:
+        if self._closed or not self._ocr_pending:
+            return
+        try:
+            self._ocr_selector = OcrRegionSelector(
+                self.root,
+                self._start_ocr_recognition,
+                self._cancel_ocr_capture,
+            )
+        except (OSError, tk.TclError, ValueError) as exc:
+            self._cancel_ocr_capture(f"无法打开 OCR 选区: {exc}")
+
+    def _start_ocr_recognition(self, region: ScreenRegion) -> None:
+        self._ocr_selector = None
+        if self._closed or not self._ocr_pending:
+            return
+        self._set_automation_state("ocr-recognizing")
+        thread = threading.Thread(
+            target=self._ocr_worker,
+            args=(region,),
+            daemon=True,
+            name="TranslatorWindowsOcr",
+        )
+        thread.start()
+
+    def _cancel_ocr_capture(self, error: str | None) -> None:
+        restore_window = self._ocr_restore_on_cancel
+        self._ocr_pending = False
+        self._ocr_restore_on_cancel = False
+        self._ocr_selector = None
+        self._discard_mouse_events()
+        if self._closed:
+            return
+        if error:
+            self._show_near_cursor()
+            self._show_ocr_error(error)
+        elif restore_window:
+            self.show_window()
+
+    def _ocr_worker(self, region: ScreenRegion) -> None:
+        try:
+            text = recognize_screen_region(region)
+        except WindowsOcrError as exc:
+            self._ocr_results.put((None, str(exc)))
+        except Exception as exc:  # Keep the UI alive on native/runtime failures.
+            self._ocr_results.put((None, f"Windows OCR 失败: {exc}"))
+        else:
+            self._ocr_results.put((text, None))
+
+    def _poll_ocr_results(self) -> None:
+        if self._closed:
+            return
+        try:
+            while True:
+                text, error = self._ocr_results.get_nowait()
+                if not self._ocr_pending:
+                    continue
+                self._ocr_pending = False
+                self._ocr_restore_on_cancel = False
+                self._discard_mouse_events()
+                if error:
+                    self._set_automation_state("ocr-error")
+                    self._show_near_cursor()
+                    self._show_ocr_error(error)
+                elif not text or not text.strip():
+                    self._set_automation_state("ocr-empty")
+                    self._show_near_cursor()
+                    self._show_ocr_error("选区内没有识别到文字，请框选更清晰的文字区域")
+                else:
+                    self._set_automation_state("ocr-recognized")
+                    self._accept_selected_text(text.strip())
+        except queue.Empty:
+            pass
+        self.root.after(60, self._poll_ocr_results)
 
     def _begin_selection_capture(self) -> None:
         selected_text = get_selected_text_by_automation()
@@ -1163,6 +1420,10 @@ class TranslatorApp:
         self._show_near_cursor()
         self._set_input_text(selected_text[:5_000])
         self._show_result("")
+        if self._busy:
+            # A new global capture supersedes an older in-flight translation.
+            # translate_now increments the request id, so the old result is ignored.
+            self._set_busy(False)
         self.translate_now()
 
     def _set_placeholder(self) -> None:
@@ -1248,7 +1509,7 @@ class TranslatorApp:
         self._show_result("")
         self.provider_meta.configure(text="等待输入", fg=COLORS["muted"])
         self.footer_status.configure(
-            text=f"就绪  ·  {self.hotkey_spec.display} 划词  ·  Ctrl+Enter 翻译",
+            text=self._ready_status(),
             fg=COLORS["muted"],
         )
         self._update_counter()
@@ -1309,7 +1570,7 @@ class TranslatorApp:
                         text=f"检测到 {detected}", fg=COLORS["accent"]
                     )
                     self.footer_status.configure(
-                        text=f"翻译完成  ·  {self.hotkey_spec.display} 继续划词",
+                        text=self._ready_status("翻译完成"),
                         fg=COLORS["muted"],
                     )
         except queue.Empty:
@@ -1370,6 +1631,14 @@ class TranslatorApp:
             fg=COLORS["danger"],
         )
 
+    def _show_ocr_error(self, message: str) -> None:
+        self._show_result(message, color=COLORS["danger"])
+        self.provider_meta.configure(text="Windows OCR 失败", fg=COLORS["danger"])
+        self.footer_status.configure(
+            text=f"请按 {self.ocr_hotkey_spec.display} 重新框选文字",
+            fg=COLORS["danger"],
+        )
+
     def copy_result(self) -> None:
         text = self.result_text.get("1.0", "end-1c").strip()
         if not text:
@@ -1393,7 +1662,11 @@ class TranslatorApp:
 
     def exit_app(self) -> None:
         self._closed = True
+        if self._ocr_selector is not None:
+            self._ocr_selector.close()
+            self._ocr_selector = None
         self._hotkey_manager.stop()
+        self._ocr_hotkey_manager.stop()
         self._mouse_monitor.stop()
         self._tray.stop()
         self.root.destroy()

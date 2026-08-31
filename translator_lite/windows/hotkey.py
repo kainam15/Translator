@@ -13,6 +13,7 @@ from typing import Any
 WM_HOTKEY = 0x0312
 WM_QUIT = 0x0012
 HOTKEY_ID = 0x5452
+OCR_HOTKEY_ID = 0x4F43
 
 MOD_ALT = 0x0001
 MOD_CONTROL = 0x0002
@@ -89,6 +90,7 @@ class HotkeySpec:
 
 
 DEFAULT_HOTKEY = HotkeySpec(("Alt",), "W")
+DEFAULT_OCR_HOTKEY = HotkeySpec(("Alt",), "Q")
 
 
 class POINT(ctypes.Structure):
@@ -176,8 +178,22 @@ class MONITORINFO(ctypes.Structure):
 class GlobalHotkey:
     """Register one global hotkey and publish invocations to a queue."""
 
-    def __init__(self, events: queue.Queue[str]) -> None:
+    def __init__(
+        self,
+        events: queue.Queue[str],
+        *,
+        event_name: str = "invoke",
+        hotkey_id: int = HOTKEY_ID,
+        thread_name: str = "TranslatorGlobalHotkey",
+    ) -> None:
+        if not event_name:
+            raise ValueError("快捷键事件名称不能为空")
+        if not 0 <= hotkey_id <= 0xBFFF:
+            raise ValueError("快捷键 ID 必须位于 0x0000 到 0xBFFF")
         self.events = events
+        self._event_name = event_name
+        self._hotkey_id = hotkey_id
+        self._thread_name = thread_name
         self._thread: threading.Thread | None = None
         self._thread_id: int | None = None
         self._ready = threading.Event()
@@ -196,7 +212,7 @@ class GlobalHotkey:
             target=self._message_loop,
             args=(spec,),
             daemon=True,
-            name="TranslatorGlobalHotkey",
+            name=self._thread_name,
         )
         self._thread.start()
         if not self._ready.wait(timeout):
@@ -208,6 +224,13 @@ class GlobalHotkey:
         thread_id = self._thread_id
         if thread and thread.is_alive() and thread_id and hasattr(ctypes, "WinDLL"):
             user32 = ctypes.WinDLL("user32", use_last_error=True)
+            user32.PostThreadMessageW.argtypes = (
+                wintypes.DWORD,
+                wintypes.UINT,
+                wintypes.WPARAM,
+                wintypes.LPARAM,
+            )
+            user32.PostThreadMessageW.restype = wintypes.BOOL
             user32.PostThreadMessageW(thread_id, WM_QUIT, 0, 0)
             thread.join(timeout=1.0)
         self._thread = None
@@ -217,10 +240,29 @@ class GlobalHotkey:
     def _message_loop(self, spec: HotkeySpec) -> None:
         user32 = ctypes.WinDLL("user32", use_last_error=True)
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        self._thread_id = kernel32.GetCurrentThreadId()
+        kernel32.GetCurrentThreadId.argtypes = ()
+        kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+        user32.RegisterHotKey.argtypes = (
+            wintypes.HWND,
+            ctypes.c_int,
+            wintypes.UINT,
+            wintypes.UINT,
+        )
+        user32.RegisterHotKey.restype = wintypes.BOOL
+        user32.GetMessageW.argtypes = (
+            ctypes.POINTER(MSG),
+            wintypes.HWND,
+            wintypes.UINT,
+            wintypes.UINT,
+        )
+        user32.GetMessageW.restype = wintypes.BOOL
+        user32.UnregisterHotKey.argtypes = (wintypes.HWND, ctypes.c_int)
+        user32.UnregisterHotKey.restype = wintypes.BOOL
+
+        self._thread_id = int(kernel32.GetCurrentThreadId())
         modifiers, key = spec.registration_values()
 
-        if not user32.RegisterHotKey(None, HOTKEY_ID, modifiers, key):
+        if not user32.RegisterHotKey(None, self._hotkey_id, modifiers, key):
             error_code = ctypes.get_last_error()
             self._error = (
                 f"无法注册 {spec.display}（Windows error {error_code}），"
@@ -237,10 +279,13 @@ class GlobalHotkey:
                 result = user32.GetMessageW(ctypes.byref(message), None, 0, 0)
                 if result <= 0:
                     break
-                if message.message == WM_HOTKEY and message.wParam == HOTKEY_ID:
-                    self.events.put("invoke")
+                if (
+                    message.message == WM_HOTKEY
+                    and message.wParam == self._hotkey_id
+                ):
+                    self.events.put(self._event_name)
         finally:
-            user32.UnregisterHotKey(None, HOTKEY_ID)
+            user32.UnregisterHotKey(None, self._hotkey_id)
             self._registered = False
 
 

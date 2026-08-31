@@ -2,19 +2,29 @@ import tkinter as tk
 import unittest
 
 from translator_lite.desktop.app import HotkeySettingsDialog
-from translator_lite.windows.hotkey import DEFAULT_HOTKEY, HotkeySpec
+from translator_lite.windows.hotkey import (
+    DEFAULT_HOTKEY,
+    DEFAULT_OCR_HOTKEY,
+    HotkeySpec,
+)
 
 
 class _FakeApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.hotkey_spec = DEFAULT_HOTKEY
+        self.ocr_hotkey_spec = DEFAULT_OCR_HOTKEY
         self._settings_dialog = None
 
-    def apply_hotkey(
-        self, spec: HotkeySpec, *, persist: bool
+    def apply_hotkeys(
+        self,
+        translation_spec: HotkeySpec,
+        ocr_spec: HotkeySpec,
+        *,
+        persist: bool,
     ) -> tuple[bool, str | None]:
-        self.hotkey_spec = spec
+        self.hotkey_spec = translation_spec
+        self.ocr_hotkey_spec = ocr_spec
         return True, None
 
 
@@ -56,6 +66,13 @@ class HotkeySettingsDialogLayoutTests(unittest.TestCase):
                 _bottom_inside(confirm, dialog.window),
                 dialog.window.winfo_height(),
             )
+            labels = {
+                str(widget.cget("text"))
+                for widget in _descendants(dialog.window)
+                if isinstance(widget, tk.Label)
+            }
+            self.assertIn("划词翻译", labels)
+            self.assertIn("OCR 翻译", labels)
         finally:
             if dialog is not None and dialog.window.winfo_exists():
                 dialog.window.destroy()

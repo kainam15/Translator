@@ -7,7 +7,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..windows.hotkey import DEFAULT_HOTKEY, HotkeySpec
+from ..windows.hotkey import DEFAULT_HOTKEY, DEFAULT_OCR_HOTKEY, HotkeySpec
 
 
 SETTINGS_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "TranslatorLite"
@@ -20,6 +20,7 @@ class AppSettings:
     position_pinned: bool = False
     window_position: tuple[int, int] | None = None
     window_size: tuple[int, int] | None = None
+    ocr_hotkey: HotkeySpec = DEFAULT_OCR_HOTKEY
 
 
 def settings_from_payload(payload: object) -> AppSettings:
@@ -31,6 +32,11 @@ def settings_from_payload(payload: object) -> AppSettings:
         hotkey = HotkeySpec.from_dict(payload.get("hotkey"))
     except ValueError:
         hotkey = DEFAULT_HOTKEY
+
+    try:
+        ocr_hotkey = HotkeySpec.from_dict(payload.get("ocr_hotkey"))
+    except ValueError:
+        ocr_hotkey = DEFAULT_OCR_HOTKEY
 
     raw_position = payload.get("window_position")
     position: tuple[int, int] | None = None
@@ -62,7 +68,13 @@ def settings_from_payload(payload: object) -> AppSettings:
         ):
             window_size = (width, height)
 
-    return AppSettings(hotkey, position_pinned, position, window_size)
+    return AppSettings(
+        hotkey,
+        position_pinned,
+        position,
+        window_size,
+        ocr_hotkey,
+    )
 
 
 def settings_to_payload(settings: AppSettings) -> dict[str, object]:
@@ -80,6 +92,7 @@ def settings_to_payload(settings: AppSettings) -> dict[str, object]:
         }
     return {
         "hotkey": settings.hotkey.to_dict(),
+        "ocr_hotkey": settings.ocr_hotkey.to_dict(),
         "position_pinned": settings.position_pinned,
         "window_position": position,
         "window_size": window_size,

@@ -1,0 +1,391 @@
+"""Windows screen capture and built-in Windows Runtime OCR adapter."""
+
+from __future__ import annotations
+
+import base64
+import ctypes
+import ctypes.wintypes as wintypes
+import os
+import shutil
+import struct
+import subprocess
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+
+
+SM_XVIRTUALSCREEN = 76
+SM_YVIRTUALSCREEN = 77
+SM_CXVIRTUALSCREEN = 78
+SM_CYVIRTUALSCREEN = 79
+
+SRCCOPY = 0x00CC0020
+CAPTUREBLT = 0x40000000
+DIB_RGB_COLORS = 0
+BI_RGB = 0
+BITS_PER_PIXEL = 32
+MAX_CAPTURE_PIXELS = 100_000_000
+
+
+class WindowsOcrError(RuntimeError):
+    """Raised when screen capture or Windows OCR cannot complete."""
+
+
+@dataclass(frozen=True)
+class ScreenRegion:
+    """A physical-pixel rectangle in virtual-screen coordinates."""
+
+    left: int
+    top: int
+    width: int
+    height: int
+
+    def __post_init__(self) -> None:
+        values = (self.left, self.top, self.width, self.height)
+        if not all(isinstance(value, int) and not isinstance(value, bool) for value in values):
+            raise TypeError("OCR 选区坐标必须是整数")
+        if self.width <= 0 or self.height <= 0:
+            raise ValueError("OCR 选区必须具有正数宽度和高度")
+
+    @property
+    def right(self) -> int:
+        return self.left + self.width
+
+    @property
+    def bottom(self) -> int:
+        return self.top + self.height
+
+
+class BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [
+        ("biSize", wintypes.DWORD),
+        ("biWidth", wintypes.LONG),
+        ("biHeight", wintypes.LONG),
+        ("biPlanes", wintypes.WORD),
+        ("biBitCount", wintypes.WORD),
+        ("biCompression", wintypes.DWORD),
+        ("biSizeImage", wintypes.DWORD),
+        ("biXPelsPerMeter", wintypes.LONG),
+        ("biYPelsPerMeter", wintypes.LONG),
+        ("biClrUsed", wintypes.DWORD),
+        ("biClrImportant", wintypes.DWORD),
+    ]
+
+
+class RGBQUAD(ctypes.Structure):
+    _fields_ = [
+        ("rgbBlue", ctypes.c_ubyte),
+        ("rgbGreen", ctypes.c_ubyte),
+        ("rgbRed", ctypes.c_ubyte),
+        ("rgbReserved", ctypes.c_ubyte),
+    ]
+
+
+class BITMAPINFO(ctypes.Structure):
+    _fields_ = [
+        ("bmiHeader", BITMAPINFOHEADER),
+        ("bmiColors", RGBQUAD * 1),
+    ]
+
+
+_POWERSHELL_OCR_SCRIPT = r"""
+$ProgressPreference = 'SilentlyContinue'
+$ErrorActionPreference = 'Stop'
+$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+[Windows.Storage.StorageFile, Windows.Storage, ContentType=WindowsRuntime] > $null
+[Windows.Storage.FileAccessMode, Windows.Storage, ContentType=WindowsRuntime] > $null
+[Windows.Storage.Streams.IRandomAccessStream, Windows.Storage.Streams, ContentType=WindowsRuntime] > $null
+[Windows.Graphics.Imaging.BitmapDecoder, Windows.Foundation, ContentType=WindowsRuntime] > $null
+[Windows.Graphics.Imaging.SoftwareBitmap, Windows.Foundation, ContentType=WindowsRuntime] > $null
+[Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType=WindowsRuntime] > $null
+[Windows.Media.Ocr.OcrResult, Windows.Foundation, ContentType=WindowsRuntime] > $null
+
+$script:asTask = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
+    $_.Name -eq 'AsTask' -and $_.IsGenericMethod -and $_.GetParameters().Count -eq 1
+})[0]
+
+function Await-WinRT($operation, [Type]$resultType) {
+    $method = $script:asTask.MakeGenericMethod($resultType)
+    $task = $method.Invoke($null, @($operation))
+    $task.GetAwaiter().GetResult()
+}
+
+$stream = $null
+$softwareBitmap = $null
+try {
+    $imagePath = $env:TRANSLATOR_LITE_OCR_IMAGE
+    if ([string]::IsNullOrWhiteSpace($imagePath)) {
+        throw '没有收到待识别的临时截图'
+    }
+    $file = Await-WinRT ([Windows.Storage.StorageFile]::GetFileFromPathAsync($imagePath)) ([Windows.Storage.StorageFile])
+    $stream = Await-WinRT ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
+    $decoder = Await-WinRT ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
+    $softwareBitmap = Await-WinRT ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+    $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
+    if ($null -eq $engine) {
+        throw '未安装与当前 Windows 显示语言匹配的 OCR 语言包'
+    }
+    $result = Await-WinRT ($engine.RecognizeAsync($softwareBitmap)) ([Windows.Media.Ocr.OcrResult])
+    [Console]::Out.Write($result.Text)
+} catch {
+    $message = $_.Exception.Message
+    if ([string]::IsNullOrWhiteSpace($message)) {
+        $message = 'Windows OCR 调用失败'
+    }
+    [Console]::Error.Write($message)
+    exit 1
+} finally {
+    if ($null -ne $softwareBitmap) {
+        $softwareBitmap.Dispose()
+    }
+    if ($null -ne $stream) {
+        $stream.Dispose()
+    }
+}
+"""
+
+
+def virtual_screen_bounds() -> ScreenRegion:
+    """Return the complete Windows virtual desktop in physical pixels."""
+    if not hasattr(ctypes, "WinDLL"):
+        return ScreenRegion(0, 0, 1920, 1080)
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.GetSystemMetrics.argtypes = (ctypes.c_int,)
+    user32.GetSystemMetrics.restype = ctypes.c_int
+    left = int(user32.GetSystemMetrics(SM_XVIRTUALSCREEN))
+    top = int(user32.GetSystemMetrics(SM_YVIRTUALSCREEN))
+    width = int(user32.GetSystemMetrics(SM_CXVIRTUALSCREEN))
+    height = int(user32.GetSystemMetrics(SM_CYVIRTUALSCREEN))
+    if width <= 0 or height <= 0:
+        return ScreenRegion(0, 0, 1920, 1080)
+    return ScreenRegion(left, top, width, height)
+
+
+def _capture_libraries() -> tuple[ctypes.WinDLL, ctypes.WinDLL]:
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+
+    user32.GetDC.argtypes = (wintypes.HWND,)
+    user32.GetDC.restype = wintypes.HDC
+    user32.ReleaseDC.argtypes = (wintypes.HWND, wintypes.HDC)
+    user32.ReleaseDC.restype = ctypes.c_int
+
+    gdi32.CreateCompatibleDC.argtypes = (wintypes.HDC,)
+    gdi32.CreateCompatibleDC.restype = wintypes.HDC
+    gdi32.DeleteDC.argtypes = (wintypes.HDC,)
+    gdi32.DeleteDC.restype = wintypes.BOOL
+    gdi32.CreateCompatibleBitmap.argtypes = (
+        wintypes.HDC,
+        ctypes.c_int,
+        ctypes.c_int,
+    )
+    gdi32.CreateCompatibleBitmap.restype = wintypes.HBITMAP
+    gdi32.SelectObject.argtypes = (wintypes.HDC, wintypes.HGDIOBJ)
+    gdi32.SelectObject.restype = wintypes.HGDIOBJ
+    gdi32.DeleteObject.argtypes = (wintypes.HGDIOBJ,)
+    gdi32.DeleteObject.restype = wintypes.BOOL
+    gdi32.BitBlt.argtypes = (
+        wintypes.HDC,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        wintypes.HDC,
+        ctypes.c_int,
+        ctypes.c_int,
+        wintypes.DWORD,
+    )
+    gdi32.BitBlt.restype = wintypes.BOOL
+    gdi32.GetDIBits.argtypes = (
+        wintypes.HDC,
+        wintypes.HBITMAP,
+        wintypes.UINT,
+        wintypes.UINT,
+        ctypes.c_void_p,
+        ctypes.POINTER(BITMAPINFO),
+        wintypes.UINT,
+    )
+    gdi32.GetDIBits.restype = ctypes.c_int
+    return user32, gdi32
+
+
+def capture_screen_region(destination: Path, region: ScreenRegion) -> None:
+    """Capture a physical screen region to a top-down 32-bit BMP file."""
+    if not hasattr(ctypes, "WinDLL"):
+        raise WindowsOcrError("屏幕 OCR 仅支持 Windows")
+    if region.width * region.height > MAX_CAPTURE_PIXELS:
+        raise WindowsOcrError("OCR 选区过大，请缩小范围后重试")
+
+    user32, gdi32 = _capture_libraries()
+    screen_dc = wintypes.HDC()
+    memory_dc = wintypes.HDC()
+    bitmap = wintypes.HBITMAP()
+    previous_object = wintypes.HGDIOBJ()
+    bitmap_selected = False
+
+    try:
+        screen_dc = user32.GetDC(None)
+        if not screen_dc:
+            raise ctypes.WinError(ctypes.get_last_error())
+        memory_dc = gdi32.CreateCompatibleDC(screen_dc)
+        if not memory_dc:
+            raise ctypes.WinError(ctypes.get_last_error())
+        bitmap = gdi32.CreateCompatibleBitmap(screen_dc, region.width, region.height)
+        if not bitmap:
+            raise ctypes.WinError(ctypes.get_last_error())
+        previous_object = gdi32.SelectObject(memory_dc, bitmap)
+        if not previous_object or previous_object == ctypes.c_void_p(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        bitmap_selected = True
+
+        if not gdi32.BitBlt(
+            memory_dc,
+            0,
+            0,
+            region.width,
+            region.height,
+            screen_dc,
+            region.left,
+            region.top,
+            SRCCOPY | CAPTUREBLT,
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+        if not gdi32.SelectObject(memory_dc, previous_object):
+            raise ctypes.WinError(ctypes.get_last_error())
+        bitmap_selected = False
+
+        image_size = region.width * region.height * (BITS_PER_PIXEL // 8)
+        bitmap_info = BITMAPINFO(
+            bmiHeader=BITMAPINFOHEADER(
+                biSize=ctypes.sizeof(BITMAPINFOHEADER),
+                biWidth=region.width,
+                biHeight=-region.height,
+                biPlanes=1,
+                biBitCount=BITS_PER_PIXEL,
+                biCompression=BI_RGB,
+                biSizeImage=image_size,
+                biXPelsPerMeter=0,
+                biYPelsPerMeter=0,
+                biClrUsed=0,
+                biClrImportant=0,
+            )
+        )
+        pixels = (ctypes.c_ubyte * image_size)()
+        scan_lines = gdi32.GetDIBits(
+            screen_dc,
+            bitmap,
+            0,
+            region.height,
+            ctypes.cast(pixels, ctypes.c_void_p),
+            ctypes.byref(bitmap_info),
+            DIB_RGB_COLORS,
+        )
+        if scan_lines != region.height:
+            raise ctypes.WinError(ctypes.get_last_error())
+
+        file_header_size = 14
+        pixel_offset = file_header_size + ctypes.sizeof(BITMAPINFOHEADER)
+        file_size = pixel_offset + image_size
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with destination.open("wb") as bitmap_file:
+            bitmap_file.write(
+                struct.pack("<2sIHHI", b"BM", file_size, 0, 0, pixel_offset)
+            )
+            bitmap_file.write(bytes(bitmap_info.bmiHeader))
+            bitmap_file.write(bytes(pixels))
+    except OSError as exc:
+        raise WindowsOcrError(f"截取 OCR 选区失败: {exc}") from exc
+    finally:
+        if bitmap_selected and memory_dc and previous_object:
+            gdi32.SelectObject(memory_dc, previous_object)
+        if bitmap:
+            gdi32.DeleteObject(bitmap)
+        if memory_dc:
+            gdi32.DeleteDC(memory_dc)
+        if screen_dc:
+            user32.ReleaseDC(None, screen_dc)
+
+
+def _powershell_executable() -> str:
+    system_root = os.environ.get("SystemRoot")
+    if system_root:
+        candidate = (
+            Path(system_root)
+            / "System32"
+            / "WindowsPowerShell"
+            / "v1.0"
+            / "powershell.exe"
+        )
+        if candidate.is_file():
+            return str(candidate)
+    executable = shutil.which("powershell.exe")
+    if executable:
+        return executable
+    raise WindowsOcrError("找不到 Windows PowerShell，无法调用 Windows OCR")
+
+
+def recognize_image(image_path: Path, *, timeout: float = 30.0) -> str:
+    """Recognize an image with the installed Windows.Media.Ocr engine."""
+    if not hasattr(ctypes, "WinDLL"):
+        raise WindowsOcrError("Windows OCR 仅支持 Windows 10 或更高版本")
+    if not image_path.is_file():
+        raise WindowsOcrError("OCR 临时截图不存在")
+
+    encoded_script = base64.b64encode(
+        _POWERSHELL_OCR_SCRIPT.encode("utf-16-le")
+    ).decode("ascii")
+    environment = os.environ.copy()
+    environment["TRANSLATOR_LITE_OCR_IMAGE"] = str(image_path.resolve())
+    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        completed = subprocess.run(
+            [
+                _powershell_executable(),
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-STA",
+                "-EncodedCommand",
+                encoded_script,
+            ],
+            capture_output=True,
+            check=False,
+            encoding="utf-8",
+            errors="replace",
+            env=environment,
+            timeout=timeout,
+            creationflags=creation_flags,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise WindowsOcrError("Windows OCR 识别超时") from exc
+    except OSError as exc:
+        raise WindowsOcrError(f"无法启动 Windows OCR: {exc}") from exc
+
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or "Windows OCR 返回失败状态"
+        detail = detail.replace(str(image_path), "<临时截图>")
+        raise WindowsOcrError(f"Windows OCR 失败: {detail}")
+    return completed.stdout.strip()
+
+
+def recognize_screen_region(region: ScreenRegion, *, timeout: float = 30.0) -> str:
+    """Capture, recognize, and always delete the temporary screen image."""
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        prefix="translator-lite-ocr-", suffix=".bmp"
+    )
+    os.close(file_descriptor)
+    image_path = Path(temporary_name)
+    try:
+        capture_screen_region(image_path, region)
+        return recognize_image(image_path, timeout=timeout)
+    finally:
+        try:
+            image_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            # The OCR result is more useful than a cleanup error. Windows will
+            # release the file when the child PowerShell process exits.
+            pass

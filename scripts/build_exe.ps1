@@ -1,11 +1,20 @@
 param(
-    [string]$PythonCommand = "python"
+    [string]$PythonCommand = "python",
+    [switch]$Isolated
 )
 
 $ErrorActionPreference = "Stop"
 $translatorScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $translatorProjectRoot = Split-Path -Parent $translatorScriptDir
-$translatorExecutable = Join-Path $translatorProjectRoot "dist\Translator.exe"
+if ($Isolated) {
+    $translatorDistPath = Join-Path $translatorProjectRoot ".artifacts\dist"
+    $translatorWorkPath = Join-Path $translatorProjectRoot ".artifacts\build"
+}
+else {
+    $translatorDistPath = Join-Path $translatorProjectRoot "dist"
+    $translatorWorkPath = Join-Path $translatorProjectRoot "build"
+}
+$translatorExecutable = Join-Path $translatorDistPath "Translator.exe"
 
 Push-Location $translatorProjectRoot
 try {
@@ -20,11 +29,16 @@ try {
             $translatorLockProbe.Dispose()
         }
         catch {
-            throw "Cannot replace dist\Translator.exe. Exit Translator from its tray menu, then rebuild."
+            throw "Cannot replace $translatorExecutable. Exit that Translator instance, then rebuild."
         }
     }
 
-    & $PythonCommand -m PyInstaller --noconfirm --clean .\Translator.spec
+    & $PythonCommand -m PyInstaller `
+        --noconfirm `
+        --clean `
+        --distpath $translatorDistPath `
+        --workpath $translatorWorkPath `
+        .\Translator.spec
     if ($LASTEXITCODE -ne 0) {
         throw "PyInstaller failed with exit code $LASTEXITCODE."
     }
