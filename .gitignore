@@ -26,6 +26,17 @@ dist-*/
 wheelhouse/
 .artifacts/
 
+# Local agent instructions, context, and skills (not application source)
+.agents/
+.claude/
+.codex/
+AGENTS.md
+AGENTS.override.md
+CLAUDE.md
+CLAUDE.local.md
+/CONTEXT.md
+/docs/agents/
+
 # Local logs and temporary files
 *.log
 *.tmp

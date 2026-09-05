@@ -113,8 +113,6 @@ Translator.spec            # PyInstaller 配置
 pyproject.toml             # Package 与命令入口元数据
 ```
 
-更完整的 Module 职责见 `CONTEXT.md`；贡献规则见 `AGENTS.md`。
-
 ## 本地 JSON 接口
 
 Web tester 向本机 `POST /api/translate`：
