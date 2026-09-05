@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import ctypes
 import ctypes.wintypes as wintypes
+import json
 import os
 import shutil
 import struct
@@ -100,6 +101,7 @@ Add-Type -AssemblyName System.Runtime.WindowsRuntime
 [Windows.Graphics.Imaging.SoftwareBitmap, Windows.Foundation, ContentType=WindowsRuntime] > $null
 [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType=WindowsRuntime] > $null
 [Windows.Media.Ocr.OcrResult, Windows.Foundation, ContentType=WindowsRuntime] > $null
+[Windows.Globalization.Language, Windows.Globalization, ContentType=WindowsRuntime] > $null
 
 $script:asTask = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
     $_.Name -eq 'AsTask' -and $_.IsGenericMethod -and $_.GetParameters().Count -eq 1
@@ -122,12 +124,57 @@ try {
     $stream = Await-WinRT ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
     $decoder = Await-WinRT ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
     $softwareBitmap = Await-WinRT ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
-    $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
+    $requestedLanguage = $env:TRANSLATOR_LITE_OCR_LANGUAGE
+    if ([string]::IsNullOrWhiteSpace($requestedLanguage)) {
+        $requestedLanguage = 'auto'
+    }
+    if ($requestedLanguage -eq 'auto') {
+        $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
+        if ($null -eq $engine) {
+            $available = @([Windows.Media.Ocr.OcrEngine]::AvailableRecognizerLanguages)
+            if ($available.Count -gt 0) {
+                $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage($available[0])
+            }
+        }
+    } else {
+        $language = [Windows.Globalization.Language]::new($requestedLanguage)
+        $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage($language)
+        if ($null -eq $engine) {
+            throw "未安装 $requestedLanguage 的 Windows OCR 语言包，请安装该语言包或选择自动检测"
+        }
+    }
     if ($null -eq $engine) {
-        throw '未安装与当前 Windows 显示语言匹配的 OCR 语言包'
+        throw '未安装可用的 Windows OCR 语言包'
     }
     $result = Await-WinRT ($engine.RecognizeAsync($softwareBitmap)) ([Windows.Media.Ocr.OcrResult])
-    [Console]::Out.Write($result.Text)
+    $engineLanguage = $engine.RecognizerLanguage.LanguageTag
+    $englishText = ''
+    # CJK recognizers can split Latin words and confuse letter case. Reuse the
+    # same bitmap and process for an English candidate; Python selects it only
+    # when the original result contains ASCII letters and no other letters.
+    if ($requestedLanguage -eq 'auto' -and $engineLanguage -match '^(zh|ja|ko)(-|$)' -and $result.Text -match '[a-zA-Z]') {
+        try {
+            $englishLanguage = [Windows.Media.Ocr.OcrEngine]::AvailableRecognizerLanguages |
+                Where-Object { $_.LanguageTag -match '^en(-|$)' } |
+                Select-Object -First 1
+            if ($null -ne $englishLanguage) {
+                $englishEngine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage($englishLanguage)
+                if ($null -ne $englishEngine) {
+                    $englishResult = Await-WinRT ($englishEngine.RecognizeAsync($softwareBitmap)) ([Windows.Media.Ocr.OcrResult])
+                    $englishText = $englishResult.Text
+                }
+            }
+        } catch {
+            # An optional retry must not discard a successful first result.
+            $englishText = ''
+        }
+    }
+    $payload = @{
+        text = $result.Text
+        language = $engineLanguage
+        english_text = $englishText
+    } | ConvertTo-Json -Compress
+    [Console]::Out.Write($payload)
 } catch {
     $message = $_.Exception.Message
     if ([string]::IsNullOrWhiteSpace($message)) {
@@ -326,8 +373,34 @@ def _powershell_executable() -> str:
     raise WindowsOcrError("找不到 Windows PowerShell，无法调用 Windows OCR")
 
 
-def recognize_image(image_path: Path, *, timeout: float = 30.0) -> str:
-    """Recognize an image with the installed Windows.Media.Ocr engine."""
+def _select_recognized_text(output: str) -> str:
+    """Prefer the English candidate for ASCII prose read by a CJK engine."""
+    try:
+        payload = json.loads(output)
+    except (ValueError, TypeError) as exc:
+        raise WindowsOcrError("Windows OCR 识别结果格式无效") from exc
+    if not isinstance(payload, dict) or not all(
+        isinstance(payload.get(key), str)
+        for key in ("text", "language", "english_text")
+    ):
+        raise WindowsOcrError("Windows OCR 识别结果格式无效")
+
+    original = payload["text"].strip()
+    english = payload["english_text"].strip()
+    language = payload["language"].lower().split("-")[0]
+    if english and language in {"zh", "ja", "ko"}:
+        letters = [character for character in original if character.isalpha()]
+        # Retain Chinese, mixed scripts, accented prose and Greek variables.
+        # Never repair spacing or case by guessing at the recognized words.
+        if letters and all(character.isascii() for character in letters):
+            return english
+    return original
+
+
+def recognize_image(
+    image_path: Path, *, language: str = "auto", timeout: float = 30.0
+) -> str:
+    """Recognize locally, honoring a source language or detecting Latin prose."""
     if not hasattr(ctypes, "WinDLL"):
         raise WindowsOcrError("Windows OCR 仅支持 Windows 10 或更高版本")
     if not image_path.is_file():
@@ -338,6 +411,7 @@ def recognize_image(image_path: Path, *, timeout: float = 30.0) -> str:
     ).decode("ascii")
     environment = os.environ.copy()
     environment["TRANSLATOR_LITE_OCR_IMAGE"] = str(image_path.resolve())
+    environment["TRANSLATOR_LITE_OCR_LANGUAGE"] = language
     creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
         completed = subprocess.run(
@@ -367,10 +441,12 @@ def recognize_image(image_path: Path, *, timeout: float = 30.0) -> str:
         detail = completed.stderr.strip() or "Windows OCR 返回失败状态"
         detail = detail.replace(str(image_path), "<临时截图>")
         raise WindowsOcrError(f"Windows OCR 失败: {detail}")
-    return completed.stdout.strip()
+    return _select_recognized_text(completed.stdout)
 
 
-def recognize_screen_region(region: ScreenRegion, *, timeout: float = 30.0) -> str:
+def recognize_screen_region(
+    region: ScreenRegion, *, language: str = "auto", timeout: float = 30.0
+) -> str:
     """Capture, recognize, and always delete the temporary screen image."""
     file_descriptor, temporary_name = tempfile.mkstemp(
         prefix="translator-lite-ocr-", suffix=".bmp"
@@ -379,7 +455,7 @@ def recognize_screen_region(region: ScreenRegion, *, timeout: float = 30.0) -> s
     image_path = Path(temporary_name)
     try:
         capture_screen_region(image_path, region)
-        return recognize_image(image_path, timeout=timeout)
+        return recognize_image(image_path, language=language, timeout=timeout)
     finally:
         try:
             image_path.unlink()

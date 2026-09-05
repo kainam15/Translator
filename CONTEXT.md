@@ -7,6 +7,7 @@
 - **Settings**: the persisted selection/OCR hotkeys, pinned-window position, and window size stored under `%APPDATA%\TranslatorLite`.
 - **Selection Capture**: obtains selected text through UI Automation, with a clipboard shortcut fallback.
 - **Screen OCR**: lets the user drag a screen rectangle, captures it with Win32 GDI, and recognizes it locally through `Windows.Media.Ocr` before translation.
+  The source-language selector also chooses the OCR language. Auto mode starts with the Windows profile recognizer; for ASCII prose from a CJK recognizer, it prefers an available English recognition of the same bitmap. Mixed scripts retain the profile result, and an unavailable or failed English retry does not discard it.
 - **Windows Adapters**: native implementations for global hotkeys, mouse hooks, selection, OCR, window positioning and repainting, monitor geometry, and the system tray.
 - **Web Tester**: a local-only HTTP interface used to exercise the Translation Client from a browser.
 

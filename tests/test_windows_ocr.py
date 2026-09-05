@@ -1,4 +1,5 @@
 import ctypes
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -34,7 +35,9 @@ class WindowsOcrTests(unittest.TestCase):
     ) -> None:
         powershell.return_value = "powershell.exe"
         run.return_value.returncode = 0
-        run.return_value.stdout = "Hello OCR\r\n"
+        run.return_value.stdout = json.dumps(
+            {"text": "Hello OCR\r\n", "language": "en-GB", "english_text": ""}
+        )
         run.return_value.stderr = ""
         with TemporaryDirectory() as directory:
             image_path = Path(directory) / "sample.bmp"
@@ -50,6 +53,100 @@ class WindowsOcrTests(unittest.TestCase):
             run.call_args.kwargs["env"]["TRANSLATOR_LITE_OCR_IMAGE"],
             str(image_path.resolve()),
         )
+        self.assertEqual(
+            run.call_args.kwargs["env"]["TRANSLATOR_LITE_OCR_LANGUAGE"], "auto"
+        )
+
+    @patch("translator_lite.windows.ocr._powershell_executable")
+    @patch("translator_lite.windows.ocr.subprocess.run")
+    def test_english_page_uses_english_recognition_on_chinese_windows(
+        self, run, powershell
+    ) -> None:
+        powershell.return_value = "powershell.exe"
+        run.return_value.returncode = 0
+        run.return_value.stdout = json.dumps({
+            "text": "Because ofthis, it is useful tO know hOW tO evaluate a polynomial.",
+            "language": "zh-Hans-CN",
+            "english_text": "Because of this, it is useful to know how to evaluate a polynomial.",
+        })
+        with TemporaryDirectory() as directory:
+            image_path = Path(directory) / "sample.bmp"
+            image_path.write_bytes(b"BM")
+
+            result = recognize_image(image_path)
+
+        self.assertEqual(
+            result,
+            "Because of this, it is useful to know how to evaluate a polynomial.",
+        )
+
+    @patch("translator_lite.windows.ocr._powershell_executable")
+    @patch("translator_lite.windows.ocr.subprocess.run")
+    def test_other_scripts_and_missing_english_keep_original_recognition(
+        self, run, powershell
+    ) -> None:
+        powershell.return_value = "powershell.exe"
+        run.return_value.returncode = 0
+        cases = (
+            ("zh-Hans-CN", "这是中文测试", "garbled English"),
+            ("zh-Hans-CN", "使用 Python 计算", "Python"),
+            ("ja-JP", "日本語のテスト", "garbled English"),
+            ("ko-KR", "한국어 테스트", "garbled English"),
+            ("zh-Hans-CN", "123 + 456 = 579", "123 + 456 - 579"),
+            ("zh-Hans-CN", "Café déjà vu", "Cafe deja vu"),
+            ("zh-Hans-CN", "The angle is θ.", "The angle is O."),
+            ("de-DE", "Die Funktion ist linear.", "different text"),
+            ("en-GB", "NASA uses Python.", "different text"),
+            ("zh-Hans-CN", "Because ofthis", ""),
+            ("zh-Hans-CN", "Because ofthis", "  "),
+            ("zh-Hans-CN", "", "spurious text"),
+        )
+        with TemporaryDirectory() as directory:
+            image_path = Path(directory) / "sample.bmp"
+            image_path.write_bytes(b"BM")
+            for language, original, english in cases:
+                with self.subTest(language=language, original=original):
+                    run.return_value.stdout = json.dumps({
+                        "text": original,
+                        "language": language,
+                        "english_text": english,
+                    })
+                    self.assertEqual(recognize_image(image_path), original)
+
+    @patch("translator_lite.windows.ocr._powershell_executable")
+    @patch("translator_lite.windows.ocr.subprocess.run")
+    def test_explicit_language_is_passed_without_shell_interpolation(
+        self, run, powershell
+    ) -> None:
+        powershell.return_value = "powershell.exe"
+        run.return_value.returncode = 0
+        run.return_value.stdout = json.dumps({
+            "text": "NASA uses Python.", "language": "en-GB", "english_text": ""
+        })
+        with TemporaryDirectory() as directory:
+            image_path = Path(directory) / "sample.bmp"
+            image_path.write_bytes(b"BM")
+            self.assertEqual(
+                recognize_image(image_path, language="en"), "NASA uses Python."
+            )
+        self.assertEqual(
+            run.call_args.kwargs["env"]["TRANSLATOR_LITE_OCR_LANGUAGE"], "en"
+        )
+        self.assertNotIn("en", run.call_args.args[0])
+
+    @patch("translator_lite.windows.ocr._powershell_executable")
+    @patch("translator_lite.windows.ocr.subprocess.run")
+    def test_invalid_native_response_is_reported(self, run, powershell) -> None:
+        powershell.return_value = "powershell.exe"
+        run.return_value.returncode = 0
+        with TemporaryDirectory() as directory:
+            image_path = Path(directory) / "sample.bmp"
+            image_path.write_bytes(b"BM")
+            for response in ("not json", "null", "{}", '{"text": 123}'):
+                with self.subTest(response=response):
+                    run.return_value.stdout = response
+                    with self.assertRaisesRegex(WindowsOcrError, "识别结果格式无效"):
+                        recognize_image(image_path)
 
     @patch("translator_lite.windows.ocr._powershell_executable")
     @patch("translator_lite.windows.ocr.subprocess.run")
@@ -78,6 +175,22 @@ class WindowsOcrTests(unittest.TestCase):
         self.assertEqual(result, "recognized text")
         temporary_path = capture.call_args.args[0]
         self.assertFalse(temporary_path.exists())
+
+    @patch(
+        "translator_lite.windows.ocr.recognize_image",
+        side_effect=WindowsOcrError("recognition failed"),
+    )
+    @patch("translator_lite.windows.ocr.capture_screen_region")
+    def test_failed_recognition_deletes_capture_and_forwards_language(
+        self, capture, recognize
+    ) -> None:
+        with self.assertRaisesRegex(WindowsOcrError, "recognition failed"):
+            recognize_screen_region(
+                ScreenRegion(10, 20, 100, 80), language="en", timeout=5.0
+            )
+        temporary_path = capture.call_args.args[0]
+        self.assertFalse(temporary_path.exists())
+        recognize.assert_called_once_with(temporary_path, language="en", timeout=5.0)
 
 
 if __name__ == "__main__":

@@ -35,6 +35,8 @@ class OcrRegionSelector:
         root: tk.Tk,
         on_selected: Callable[[ScreenRegion], None],
         on_cancelled: Callable[[str | None], None],
+        *,
+        decorated: bool = False,
     ) -> None:
         self.root = root
         self.on_selected = on_selected
@@ -47,7 +49,8 @@ class OcrRegionSelector:
         self._grabbed = False
 
         self.window = tk.Toplevel(root)
-        self.window.overrideredirect(True)
+        self.window.title("Translator OCR")
+        self.window.overrideredirect(not decorated)
         self.window.configure(bg="#000000", cursor="crosshair")
         self.window.attributes("-topmost", True)
         self.window.attributes("-alpha", 0.30)

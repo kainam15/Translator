@@ -31,6 +31,34 @@ class DesktopOcrFlowTests(unittest.TestCase):
         app._ocr_worker(ScreenRegion(10, 20, 300, 120))
 
         self.assertEqual(app._ocr_results.get_nowait(), ("sample text", None))
+        _recognize.assert_called_once_with(
+            ScreenRegion(10, 20, 300, 120), language="auto"
+        )
+
+    @patch("translator_lite.desktop.app.threading.Thread")
+    def test_capture_reads_source_language_before_starting_worker(self, thread) -> None:
+        app = self._polling_app()
+        app.source_language = Mock()
+        app.source_language.get.return_value = "English"
+        region = ScreenRegion(10, 20, 300, 120)
+
+        app._start_ocr_recognition(region)
+
+        self.assertEqual(thread.call_args.kwargs["args"], (region, "en"))
+        thread.return_value.start.assert_called_once_with()
+
+    @patch(
+        "translator_lite.desktop.app.recognize_screen_region",
+        return_value="sample text",
+    )
+    def test_worker_forwards_selected_source_language(self, recognize) -> None:
+        app = self._polling_app()
+        region = ScreenRegion(10, 20, 300, 120)
+
+        app._ocr_worker(region, "en")
+
+        recognize.assert_called_once_with(region, language="en")
+        self.assertEqual(app._ocr_results.get_nowait(), ("sample text", None))
 
     @patch(
         "translator_lite.desktop.app.recognize_screen_region",

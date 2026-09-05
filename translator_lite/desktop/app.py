@@ -1304,6 +1304,7 @@ class TranslatorApp:
                 self.root,
                 self._start_ocr_recognition,
                 self._cancel_ocr_capture,
+                decorated=self._decorated,
             )
         except (OSError, tk.TclError, ValueError) as exc:
             self._cancel_ocr_capture(f"无法打开 OCR 选区: {exc}")
@@ -1313,9 +1314,10 @@ class TranslatorApp:
         if self._closed or not self._ocr_pending:
             return
         self._set_automation_state("ocr-recognizing")
+        language = self._language_code(self.source_language.get(), SOURCE_LANGUAGES)
         thread = threading.Thread(
             target=self._ocr_worker,
-            args=(region,),
+            args=(region, language),
             daemon=True,
             name="TranslatorWindowsOcr",
         )
@@ -1335,9 +1337,9 @@ class TranslatorApp:
         elif restore_window:
             self.show_window()
 
-    def _ocr_worker(self, region: ScreenRegion) -> None:
+    def _ocr_worker(self, region: ScreenRegion, language: str = "auto") -> None:
         try:
-            text = recognize_screen_region(region)
+            text = recognize_screen_region(region, language=language)
         except WindowsOcrError as exc:
             self._ocr_results.put((None, str(exc)))
         except Exception as exc:  # Keep the UI alive on native/runtime failures.
