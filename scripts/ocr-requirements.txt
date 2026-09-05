@@ -1,0 +1,7 @@
+# Optional OCR helper only. Install into .artifacts/ocr-env, never globally.
+onnxruntime==1.24.3
+numpy==2.4.6
+Pillow==12.3.0
+tokenizers==0.22.2
+matplotlib==3.11.1
+pyinstaller==6.22.2

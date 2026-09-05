@@ -6,6 +6,7 @@ import base64
 import ctypes
 import ctypes.wintypes as wintypes
 import json
+import math
 import os
 import shutil
 import struct
@@ -30,6 +31,34 @@ MAX_CAPTURE_PIXELS = 100_000_000
 
 class WindowsOcrError(RuntimeError):
     """Raised when screen capture or Windows OCR cannot complete."""
+
+
+@dataclass(frozen=True)
+class OcrWord:
+    """Recognized word and its left/top/right/bottom image-pixel bounds."""
+
+    text: str
+    box: tuple[float, float, float, float]
+
+
+@dataclass(frozen=True)
+class OcrLine:
+    """One recognized line retaining individual word placement."""
+
+    text: str
+    words: tuple[OcrWord, ...]
+
+    @property
+    def box(self) -> tuple[float, float, float, float]:
+        """Return the union of word bounds, or an empty box for an empty line."""
+        if not self.words:
+            return (0.0, 0.0, 0.0, 0.0)
+        return (
+            min(word.box[0] for word in self.words),
+            min(word.box[1] for word in self.words),
+            max(word.box[2] for word in self.words),
+            max(word.box[3] for word in self.words),
+        )
 
 
 @dataclass(frozen=True)
@@ -113,6 +142,24 @@ function Await-WinRT($operation, [Type]$resultType) {
     $task.GetAwaiter().GetResult()
 }
 
+function Get-OcrLines($ocrResult) {
+    foreach ($line in $ocrResult.Lines) {
+        $words = @(foreach ($word in $line.Words) {
+            $bounds = $word.BoundingRect
+            @{
+                text = $word.Text
+                box = @(
+                    [double]$bounds.X
+                    [double]$bounds.Y
+                    [double]($bounds.X + $bounds.Width)
+                    [double]($bounds.Y + $bounds.Height)
+                )
+            }
+        })
+        @{ text = $line.Text; words = $words }
+    }
+}
+
 $stream = $null
 $softwareBitmap = $null
 try {
@@ -149,6 +196,7 @@ try {
     $result = Await-WinRT ($engine.RecognizeAsync($softwareBitmap)) ([Windows.Media.Ocr.OcrResult])
     $engineLanguage = $engine.RecognizerLanguage.LanguageTag
     $englishText = ''
+    $englishLines = @()
     # CJK recognizers can split Latin words and confuse letter case. Reuse the
     # same bitmap and process for an English candidate; Python selects it only
     # when the original result contains ASCII letters and no other letters.
@@ -162,18 +210,22 @@ try {
                 if ($null -ne $englishEngine) {
                     $englishResult = Await-WinRT ($englishEngine.RecognizeAsync($softwareBitmap)) ([Windows.Media.Ocr.OcrResult])
                     $englishText = $englishResult.Text
+                    $englishLines = @(Get-OcrLines $englishResult)
                 }
             }
         } catch {
             # An optional retry must not discard a successful first result.
             $englishText = ''
+            $englishLines = @()
         }
     }
     $payload = @{
         text = $result.Text
         language = $engineLanguage
         english_text = $englishText
-    } | ConvertTo-Json -Compress
+        lines = @(Get-OcrLines $result)
+        english_lines = $englishLines
+    } | ConvertTo-Json -Compress -Depth 8
     [Console]::Out.Write($payload)
 } catch {
     $message = $_.Exception.Message
@@ -373,8 +425,8 @@ def _powershell_executable() -> str:
     raise WindowsOcrError("找不到 Windows PowerShell，无法调用 Windows OCR")
 
 
-def _select_recognized_text(output: str) -> str:
-    """Prefer the English candidate for ASCII prose read by a CJK engine."""
+def _parse_payload(output: str) -> dict:
+    """Decode the shared text and positioned-lines response."""
     try:
         payload = json.loads(output)
     except (ValueError, TypeError) as exc:
@@ -384,7 +436,11 @@ def _select_recognized_text(output: str) -> str:
         for key in ("text", "language", "english_text")
     ):
         raise WindowsOcrError("Windows OCR 识别结果格式无效")
+    return payload
 
+
+def _select_recognized_text(payload: dict) -> str:
+    """Prefer the English candidate for ASCII prose read by a CJK engine."""
     original = payload["text"].strip()
     english = payload["english_text"].strip()
     language = payload["language"].lower().split("-")[0]
@@ -397,10 +453,10 @@ def _select_recognized_text(output: str) -> str:
     return original
 
 
-def recognize_image(
+def _run_ocr_payload(
     image_path: Path, *, language: str = "auto", timeout: float = 30.0
-) -> str:
-    """Recognize locally, honoring a source language or detecting Latin prose."""
+) -> dict:
+    """Load one bitmap and return all recognition candidates from one process."""
     if not hasattr(ctypes, "WinDLL"):
         raise WindowsOcrError("Windows OCR 仅支持 Windows 10 或更高版本")
     if not image_path.is_file():
@@ -441,7 +497,150 @@ def recognize_image(
         detail = completed.stderr.strip() or "Windows OCR 返回失败状态"
         detail = detail.replace(str(image_path), "<临时截图>")
         raise WindowsOcrError(f"Windows OCR 失败: {detail}")
-    return _select_recognized_text(completed.stdout)
+    return _parse_payload(completed.stdout)
+
+
+def _parse_lines(value: object) -> list[OcrLine]:
+    """Validate native layout data before using it to place formulas."""
+    invalid = "Windows OCR 识别结果格式无效"
+    if not isinstance(value, list):
+        raise WindowsOcrError(invalid)
+    lines = []
+    for item in value:
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("text"), str)
+            or not isinstance(item.get("words"), list)
+        ):
+            raise WindowsOcrError(invalid)
+        words = []
+        for word in item["words"]:
+            if not isinstance(word, dict) or not isinstance(word.get("text"), str):
+                raise WindowsOcrError(invalid)
+            box = word.get("box")
+            if (
+                not isinstance(box, list)
+                or len(box) != 4
+                or not all(
+                    isinstance(coordinate, (int, float))
+                    and not isinstance(coordinate, bool)
+                    and math.isfinite(coordinate)
+                    for coordinate in box
+                )
+                or box[2] <= box[0]
+                or box[3] <= box[1]
+            ):
+                raise WindowsOcrError(invalid)
+            words.append(OcrWord(word["text"], tuple(float(value) for value in box)))
+        if item["text"].strip() and not words:
+            raise WindowsOcrError(invalid)
+        if words:
+            lines.append(OcrLine(item["text"], tuple(words)))
+    return lines
+
+
+def _is_ascii_prose(text: str) -> bool:
+    letters = [character for character in text if character.isalpha()]
+    return bool(letters) and all(character.isascii() for character in letters)
+
+
+def _line_match_score(first: OcrLine, second: OcrLine) -> float:
+    """Find corresponding lines by overlap while respecting columns and rows."""
+    a, b = first.box, second.box
+    overlap_x = min(a[2], b[2]) - max(a[0], b[0])
+    overlap_y = min(a[3], b[3]) - max(a[1], b[1])
+    width_a, width_b = a[2] - a[0], b[2] - b[0]
+    height_a, height_b = a[3] - a[1], b[3] - b[1]
+    if min(width_a, width_b, height_a, height_b) <= 0:
+        return 0.0
+    if overlap_x < min(width_a, width_b) * 0.5:
+        return 0.0
+    if overlap_y < min(height_a, height_b) * 0.5:
+        return 0.0
+    intersection = overlap_x * overlap_y
+    return intersection / (width_a * height_a + width_b * height_b - intersection)
+
+
+def _line_is_covered(fragment: OcrLine, candidate: OcrLine) -> bool:
+    """Detect profile fragments already included in a longer English row."""
+    a, b = fragment.box, candidate.box
+    width, height = a[2] - a[0], a[3] - a[1]
+    overlap_x = min(a[2], b[2]) - max(a[0], b[0])
+    overlap_y = min(a[3], b[3]) - max(a[1], b[1])
+    return (
+        width > 0
+        and height > 0
+        and overlap_y >= max(height, b[3] - b[1]) * 0.75
+        and overlap_x * overlap_y >= width * height * 0.85
+    )
+
+
+def _select_recognized_lines(
+    payload: dict, *, language: str = "auto"
+) -> list[OcrLine]:
+    original = _parse_lines(payload.get("lines"))
+    english = _parse_lines(payload.get("english_lines", []))
+    engine_language = payload["language"].lower().split("-")[0]
+    if language != "auto" or engine_language not in {"zh", "ja", "ko"}:
+        return original
+
+    # Match globally, best overlap first, so one English line is never inserted
+    # twice when the profile recognizer segments the same row differently.
+    eligible = [_is_ascii_prose(line.text) for line in original]
+    matches = []
+    for english_index, candidate in enumerate(english):
+        if not candidate.text.strip():
+            continue
+        # Never replace an ASCII fragment with an English line that also spans
+        # a real Chinese/mixed-script fragment from the same row.
+        if any(
+            not eligible[index] and _line_match_score(line, candidate) > 0
+            for index, line in enumerate(original)
+        ):
+            continue
+        for original_index, line in enumerate(original):
+            if eligible[original_index]:
+                score = _line_match_score(line, candidate)
+                if score > 0:
+                    matches.append((score, original_index, english_index))
+    replacements = {}
+    used_english = set()
+    consumed_original = set()
+    for _score, original_index, english_index in sorted(matches, reverse=True):
+        if original_index in consumed_original or english_index in used_english:
+            continue
+        candidate = english[english_index]
+        covered = {original_index}
+        covered.update(
+            index for index, line in enumerate(original)
+            if eligible[index]
+            and index not in consumed_original
+            and _line_is_covered(line, candidate)
+        )
+        replacements[min(covered)] = candidate
+        consumed_original.update(covered)
+        used_english.add(english_index)
+    return [
+        replacements.get(index, line)
+        for index, line in enumerate(original)
+        if index not in consumed_original or index in replacements
+    ]
+
+
+def recognize_image(
+    image_path: Path, *, language: str = "auto", timeout: float = 30.0
+) -> str:
+    """Recognize locally, honoring a source language or detecting Latin prose."""
+    payload = _run_ocr_payload(image_path, language=language, timeout=timeout)
+    return _select_recognized_text(payload)
+
+
+def recognize_image_lines(
+    image_path: Path, *, language: str = "auto", timeout: float = 30.0
+) -> list[OcrLine]:
+    """Recognize positioned lines, selecting English prose separately per row."""
+    payload = _run_ocr_payload(image_path, language=language, timeout=timeout)
+    return _select_recognized_lines(payload, language=language)
 
 
 def recognize_screen_region(

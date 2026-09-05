@@ -7,14 +7,161 @@ from unittest.mock import patch
 
 from translator_lite.windows.ocr import (
     BITMAPINFOHEADER,
+    OcrLine,
+    OcrWord,
     ScreenRegion,
     WindowsOcrError,
     recognize_image,
+    recognize_image_lines,
     recognize_screen_region,
 )
 
 
 class WindowsOcrTests(unittest.TestCase):
+    @staticmethod
+    def _line(text: str, box: tuple[float, float, float, float]) -> dict:
+        return {"text": text, "words": [{"text": text, "box": list(box)}]}
+
+    def _recognize_lines(self, run, powershell, payload, **kwargs):
+        powershell.return_value = "powershell.exe"
+        run.return_value.returncode = 0
+        run.return_value.stdout = json.dumps(payload)
+        with TemporaryDirectory() as directory:
+            image_path = Path(directory) / "sample.bmp"
+            image_path.write_bytes(b"BM")
+            return recognize_image_lines(image_path, **kwargs)
+
+    @patch("translator_lite.windows.ocr._powershell_executable")
+    @patch("translator_lite.windows.ocr.subprocess.run")
+    def test_image_lines_preserve_word_coordinates(self, run, powershell) -> None:
+        payload = {
+            "text": "Hello OCR", "language": "en-GB", "english_text": "",
+            "lines": [{"text": "Hello OCR", "words": [
+                {"text": "Hello", "box": [2.5, 4.0, 38.5, 20.0]},
+                {"text": "OCR", "box": [45.0, 3.0, 77.0, 21.0]},
+            ]}],
+        }
+        lines = self._recognize_lines(run, powershell, payload, timeout=8.0)
+        self.assertEqual(lines, [OcrLine("Hello OCR", (
+            OcrWord("Hello", (2.5, 4.0, 38.5, 20.0)),
+            OcrWord("OCR", (45.0, 3.0, 77.0, 21.0)),
+        ))])
+        self.assertEqual(lines[0].box, (2.5, 3.0, 77.0, 21.0))
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.kwargs["timeout"], 8.0)
+
+    @patch("translator_lite.windows.ocr._powershell_executable")
+    @patch("translator_lite.windows.ocr.subprocess.run")
+    def test_english_lines_are_selected_by_position_despite_other_scripts(
+        self, run, powershell
+    ) -> None:
+        first = self._line("hOW tO evaluate", (10, 10, 220, 30))
+        second = self._line("The coeffi cients", (10, 60, 220, 80))
+        chinese = self._line("使用 Python 计算", (10, 110, 220, 130))
+        symbol = self._line("工", (10, 160, 40, 180))
+        payload = {
+            "text": "hOW tO evaluate 工", "language": "zh-Hans-CN",
+            "english_text": "how to evaluate The coefficients",
+            "lines": [first, second, chinese, symbol],
+            "english_lines": [
+                self._line("The coefficients", (11, 60, 219, 80)),
+                self._line("how to evaluate", (10, 10, 218, 30)),
+                self._line("Python", (10, 110, 220, 130)),
+                self._line("I", (10, 160, 40, 180)),
+            ],
+        }
+        lines = self._recognize_lines(run, powershell, payload)
+        self.assertEqual([line.text for line in lines], [
+            "how to evaluate", "The coefficients", "使用 Python 计算", "工",
+        ])
+
+    @patch("translator_lite.windows.ocr._powershell_executable")
+    @patch("translator_lite.windows.ocr.subprocess.run")
+    def test_english_candidate_is_not_reused_for_split_profile_lines(
+        self, run, powershell
+    ) -> None:
+        payload = {
+            "text": "hOW tO evaluate", "language": "zh-Hans-CN",
+            "english_text": "how to evaluate",
+            "lines": [
+                self._line("hOW tO", (10, 10, 90, 30)),
+                self._line("evaluate", (110, 10, 220, 30)),
+            ],
+            "english_lines": [
+                self._line("how to evaluate", (10, 10, 220, 30)),
+            ],
+        }
+        lines = self._recognize_lines(run, powershell, payload)
+        self.assertEqual([line.text for line in lines], ["how to evaluate"])
+
+    @patch("translator_lite.windows.ocr._powershell_executable")
+    @patch("translator_lite.windows.ocr.subprocess.run")
+    def test_english_line_spanning_chinese_fragment_is_not_selected(
+        self, run, powershell
+    ) -> None:
+        payload = {
+            "text": "Compute 计算", "language": "zh-Hans-CN",
+            "english_text": "Compute garbled",
+            "lines": [
+                self._line("Compute", (10, 10, 120, 30)),
+                self._line("计算", (130, 10, 220, 30)),
+            ],
+            "english_lines": [
+                self._line("Compute garbled", (10, 10, 220, 30)),
+            ],
+        }
+        lines = self._recognize_lines(run, powershell, payload)
+        self.assertEqual([line.text for line in lines], ["Compute", "计算"])
+
+    @patch("translator_lite.windows.ocr._powershell_executable")
+    @patch("translator_lite.windows.ocr.subprocess.run")
+    def test_lines_keep_original_without_spatially_matching_english(
+        self, run, powershell
+    ) -> None:
+        original = self._line("NASA uses Python.", (10, 10, 220, 30))
+        payload = {
+            "text": original["text"], "language": "zh-Hans-CN",
+            "english_text": "different line", "lines": [original],
+            "english_lines": [self._line("different line", (10, 80, 220, 100))],
+        }
+        lines = self._recognize_lines(run, powershell, payload)
+        self.assertEqual([line.text for line in lines], [original["text"]])
+        payload.pop("english_lines")
+        lines = self._recognize_lines(run, powershell, payload)
+        self.assertEqual([line.text for line in lines], [original["text"]])
+
+    @patch("translator_lite.windows.ocr._powershell_executable")
+    @patch("translator_lite.windows.ocr.subprocess.run")
+    def test_explicit_language_does_not_switch_line_candidates(
+        self, run, powershell
+    ) -> None:
+        payload = {
+            "text": "hOW tO evaluate", "language": "zh-Hans-CN",
+            "english_text": "how to evaluate",
+            "lines": [self._line("hOW tO evaluate", (10, 10, 220, 30))],
+            "english_lines": [self._line("how to evaluate", (10, 10, 220, 30))],
+        }
+        lines = self._recognize_lines(run, powershell, payload, language="zh-CN")
+        self.assertEqual([line.text for line in lines], ["hOW tO evaluate"])
+
+    @patch("translator_lite.windows.ocr._powershell_executable")
+    @patch("translator_lite.windows.ocr.subprocess.run")
+    def test_invalid_line_response_is_reported(self, run, powershell) -> None:
+        base = {"text": "hello", "language": "en-GB", "english_text": ""}
+        invalid_lines = [
+            None, {}, [None], [{"text": 1, "words": []}],
+            [{"text": "hello", "words": None}],
+            [{"text": "hello", "words": [{"text": "hello", "box": [0, 0, 20]}]}],
+            [{"text": "hello", "words": [{"text": 1, "box": [0, 0, 20, 20]}]}],
+        ]
+        for box in ([0, 0, 0, 20], [20, 0, 10, 20], [0, 0, 20, float("nan")],
+                    [0, 0, True, 20], [0, 0, "20", 20]):
+            invalid_lines.append([self._line("hello", box)])
+        for lines in invalid_lines:
+            with self.subTest(lines=lines):
+                with self.assertRaisesRegex(WindowsOcrError, "识别结果格式无效"):
+                    self._recognize_lines(run, powershell, {**base, "lines": lines})
+
     def test_bitmap_header_matches_windows_abi(self) -> None:
         self.assertEqual(ctypes.sizeof(BITMAPINFOHEADER), 40)
 

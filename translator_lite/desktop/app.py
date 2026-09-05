@@ -13,7 +13,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from tkinter import ttk
 
-from ..client import GoogleTranslateError, TranslationResult, translate
+from ..client import GoogleTranslateError, TranslationResult
+from ..math_translation import split_math_parts, translate_with_math
+from ..ocr.service import close_helper, recognize_screen_region, render_formulas
 from ..windows.hotkey import (
     OCR_HOTKEY_ID,
     GlobalHotkey,
@@ -24,12 +26,13 @@ from ..windows.hotkey import (
     work_area_for_point,
 )
 from ..windows.mouse import GlobalMouseClick, window_at_point_is_current_process
-from ..windows.ocr import ScreenRegion, WindowsOcrError, recognize_screen_region
+from ..windows.ocr import ScreenRegion, WindowsOcrError
 from ..windows.selection import get_selected_text_by_automation
 from ..windows.tray import SystemTray
 from ..windows.window import redraw_window, set_window_bounds, set_window_position
 from .placement import clamp_window_position, resize_window_geometry, scale_for_dpi
 from .ocr_overlay import OcrRegionSelector
+from .math_view import MathTextView
 from .settings import AppSettings, load_settings, save_settings
 from .theme import (
     COLORS,
@@ -390,6 +393,10 @@ class TranslatorApp:
         self._clipboard_deadline = 0.0
         self._progress_offset = -MARQUEE_SPAN
         self._progress_running = False
+        self._math_preview = True
+        self._rendered_math: dict[str, str] = {}
+        self._math_results: queue.Queue[tuple[str, str]] = queue.Queue()
+        self._math_dpi = float(root.winfo_fpixels("1i"))
         settings = load_settings()
         self.hotkey_spec = settings.hotkey
         self.ocr_hotkey_spec = settings.ocr_hotkey
@@ -749,6 +756,13 @@ class TranslatorApp:
         flat_button(
             heading, "清空", self.clear, kind="quiet", padx=7, pady=2
         ).pack(side="left", padx=(2, 0))
+        flat_button(
+            heading, "复制", self.copy_source, kind="quiet", padx=7, pady=2
+        ).pack(side="left", padx=(2, 0))
+        self.math_mode_button = flat_button(
+            heading, "LaTeX", self.toggle_math_view, kind="quiet", padx=7, pady=2
+        )
+        self.math_mode_button.pack(side="left", padx=(2, 0))
 
         self.counter_label = tk.Label(
             heading,
@@ -771,6 +785,9 @@ class TranslatorApp:
         )
         source_area.container.pack(fill="x", padx=1)
         self.source_text = source_area.text
+        self._source_view = MathTextView(self.source_text)
+        self.source_text.bind("<<Copy>>", self._source_view.copy_selection)
+        self.source_text.bind("<<Cut>>", self._source_view.cut_selection)
 
         controls = tk.Frame(section, bg=COLORS["sunken"])
         controls.pack(fill="x", padx=13, pady=(4, 9))
@@ -851,6 +868,8 @@ class TranslatorApp:
         )
         result_area.container.pack(fill="both", expand=True)
         self.result_text = result_area.text
+        self._result_view = MathTextView(self.result_text)
+        self.result_text.bind("<<Copy>>", self._result_view.copy_selection)
 
     def _bind_shortcuts(self) -> None:
         self.root.bind_all("<Control-Return>", self.translate_now)
@@ -1340,10 +1359,11 @@ class TranslatorApp:
     def _ocr_worker(self, region: ScreenRegion, language: str = "auto") -> None:
         try:
             text = recognize_screen_region(region, language=language)
+            self._prepare_math(text)
         except WindowsOcrError as exc:
             self._ocr_results.put((None, str(exc)))
         except Exception as exc:  # Keep the UI alive on native/runtime failures.
-            self._ocr_results.put((None, f"Windows OCR 失败: {exc}"))
+            self._ocr_results.put((None, f"OCR 失败: {exc}"))
         else:
             self._ocr_results.put((text, None))
 
@@ -1420,7 +1440,7 @@ class TranslatorApp:
 
     def _accept_selected_text(self, selected_text: str) -> None:
         self._show_near_cursor()
-        self._set_input_text(selected_text[:5_000])
+        self._set_input_text(selected_text)
         self._show_result("")
         if self._busy:
             # A new global capture supersedes an older in-flight translation.
@@ -1431,13 +1451,12 @@ class TranslatorApp:
     def _set_placeholder(self) -> None:
         self._placeholder_active = True
         self.source_text.configure(fg=COLORS["faint"])
-        self.source_text.delete("1.0", "end")
-        self.source_text.insert("1.0", PLACEHOLDER)
+        self._source_view.set_content(PLACEHOLDER)
 
     def _remove_placeholder(self, _event: tk.Event[tk.Misc] | None = None) -> None:
         if not self._placeholder_active:
             return
-        self.source_text.delete("1.0", "end")
+        self._source_view.set_content("")
         self.source_text.configure(fg=COLORS["text"])
         self._placeholder_active = False
         self._update_counter()
@@ -1445,21 +1464,94 @@ class TranslatorApp:
     def _restore_placeholder_if_empty(
         self, _event: tk.Event[tk.Misc] | None = None
     ) -> None:
-        if not self.source_text.get("1.0", "end-1c").strip():
+        if not self._placeholder_active and not self._source_view.get_content().strip():
             self._set_placeholder()
             self._update_counter()
 
     def _input_text(self) -> str:
         if self._placeholder_active:
             return ""
-        return self.source_text.get("1.0", "end-1c").strip()
+        return self._source_view.get_content().strip()
 
     def _set_input_text(self, text: str) -> None:
         self._placeholder_active = False
         self.source_text.configure(fg=COLORS["text"])
-        self.source_text.delete("1.0", "end")
-        self.source_text.insert("1.0", text[:MAX_TEXT_LENGTH])
+        # Never cut halfway through LaTeX. The client reports an over-limit
+        # document so the user can shorten it without losing a formula.
+        if not any(is_math for is_math, _part in split_math_parts(text)):
+            text = text[:MAX_TEXT_LENGTH]
+        self._source_view.set_content(text, self._math_images())
         self._update_counter()
+
+    def _math_images(self) -> dict[str, str]:
+        return self._rendered_math if self._math_preview else {}
+
+    def _prepare_math(self, text: str) -> None:
+        """Prepare image bytes off the Tk thread; LaTeX remains authoritative."""
+        if len(text) > MAX_TEXT_LENGTH:
+            return
+        cached = getattr(self, "_rendered_math", {})
+        missing = list(dict.fromkeys(
+            part for is_math, part in split_math_parts(text)
+            if is_math and part not in cached
+        ))
+        if not missing:
+            return
+        images = render_formulas(
+            "\n".join(missing), dpi=getattr(self, "_math_dpi", 144),
+            font_size=FONTS["content"][1],
+        )
+        if not images:
+            return
+        if not hasattr(self, "_rendered_math"):
+            self._rendered_math = {}
+        self._rendered_math.update(images)
+        while len(self._rendered_math) > 96:
+            del self._rendered_math[next(iter(self._rendered_math))]
+
+    def toggle_math_view(self) -> None:
+        source = self._input_text()
+        result = self._result_view.get_content()
+        self._math_preview = not self._math_preview
+        self.math_mode_button.configure(text="LaTeX" if self._math_preview else "公式")
+        if not self._placeholder_active:
+            self._source_view.set_content(source, self._math_images())
+        self._result_view.set_content(result, self._math_images())
+        if self._math_preview and any(
+            is_math and part not in self._rendered_math
+            for is_math, part in split_math_parts(source + "\n" + result)
+        ):
+            threading.Thread(
+                target=self._math_preview_worker, args=(source, result),
+                daemon=True, name="TranslatorMathPreview",
+            ).start()
+
+    def _math_preview_worker(self, source: str, result: str) -> None:
+        self._prepare_math(source)
+        self._prepare_math(result)
+        self._math_results.put((source, result))
+
+    def _poll_math_previews(self) -> None:
+        try:
+            while True:
+                source, result = self._math_results.get_nowait()
+                if self._math_preview:
+                    if not self._placeholder_active and source == self._input_text():
+                        self._source_view.set_content(source, self._math_images())
+                    if result == self._result_view.get_content():
+                        self._result_view.set_content(result, self._math_images())
+        except queue.Empty:
+            pass
+
+    def copy_source(self) -> None:
+        text = self._input_text()
+        if not text:
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self.footer_status.configure(
+            text="已复制原文（公式保留 LaTeX）", fg=COLORS["muted"]
+        )
 
     def _update_counter(self, _event: tk.Event[tk.Misc] | None = None) -> None:
         length = len(self._input_text())
@@ -1489,7 +1581,7 @@ class TranslatorApp:
             self.source_language.set(target_label)
             self.target_language.set(source_label)
 
-        result = self.result_text.get("1.0", "end-1c").strip()
+        result = self._result_view.get_content().strip()
         if result:
             original = self._input_text()
             self._set_input_text(result)
@@ -1544,7 +1636,8 @@ class TranslatorApp:
         self, request_id: int, text: str, source: str, target: str
     ) -> None:
         try:
-            result = translate(text, source=source, target=target, timeout=15.0)
+            self._prepare_math(text)
+            result = translate_with_math(text, source=source, target=target, timeout=15.0)
         except (GoogleTranslateError, ValueError) as exc:
             self._results.put((request_id, None, str(exc)))
         except Exception as exc:  # Keep the UI alive on unexpected network errors.
@@ -1555,6 +1648,7 @@ class TranslatorApp:
     def _poll_results(self) -> None:
         if self._closed:
             return
+        self._poll_math_previews()
         try:
             while True:
                 request_id, result, error = self._results.get_nowait()
@@ -1564,6 +1658,11 @@ class TranslatorApp:
                 if error:
                     self._show_error(error)
                 elif result:
+                    current_text = self._input_text()
+                    if self._math_preview and any(
+                        is_math for is_math, _part in split_math_parts(current_text)
+                    ):
+                        self._source_view.set_content(current_text, self._math_images())
                     self._show_result(result.text)
                     detected = self._language_label(
                         result.detected_source_language or "auto"
@@ -1614,9 +1713,7 @@ class TranslatorApp:
 
     def _show_result(self, text: str, *, color: str | None = None) -> None:
         self.result_text.configure(state="normal", fg=color or COLORS["text"])
-        self.result_text.delete("1.0", "end")
-        if text:
-            self.result_text.insert("1.0", text)
+        self._result_view.set_content(text, self._math_images())
         self.result_text.configure(state="disabled")
         self.copy_button.configure(state="normal" if text else "disabled")
 
@@ -1635,14 +1732,14 @@ class TranslatorApp:
 
     def _show_ocr_error(self, message: str) -> None:
         self._show_result(message, color=COLORS["danger"])
-        self.provider_meta.configure(text="Windows OCR 失败", fg=COLORS["danger"])
+        self.provider_meta.configure(text="OCR 失败", fg=COLORS["danger"])
         self.footer_status.configure(
             text=f"请按 {self.ocr_hotkey_spec.display} 重新框选文字",
             fg=COLORS["danger"],
         )
 
     def copy_result(self) -> None:
-        text = self.result_text.get("1.0", "end-1c").strip()
+        text = self._result_view.get_content().strip()
         if not text:
             return
         self.root.clipboard_clear()
@@ -1672,6 +1769,7 @@ class TranslatorApp:
         self._mouse_monitor.stop()
         self._tray.stop()
         self.root.destroy()
+        close_helper()
 
 
 def _build_parser() -> argparse.ArgumentParser:
