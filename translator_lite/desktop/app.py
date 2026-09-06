@@ -372,15 +372,23 @@ class TranslatorApp:
     RESIZE_BORDER = 6
     RESIZE_CORNER = 8
     PROGRESS_INTERVAL_MS = 16
+    RESIZE_INTERVAL_MS = 8
 
     def __init__(self, root: tk.Tk, *, decorated: bool = False) -> None:
         self.root = root
+        # Build and lay out the complete UI before exposing the first frame.
+        self.root.attributes("-alpha", 0.0)
         self._decorated = decorated
         self._drag_offset = (0, 0)
         self._resize_edge: str | None = None
         self._resize_start_pointer = (0, 0)
         self._resize_start_geometry = (0, 0, self.WIDTH, self.HEIGHT)
         self._resize_handles: dict[str, tk.Frame] = {}
+        self._resize_after_id: str | None = None
+        self._resize_layout_after_id: str | None = None
+        self._pending_resize_pointer: tuple[int, int] | None = None
+        self._presentation_after_id: str | None = None
+        self._presentation_hidden = False
         self._placeholder_active = True
         self._busy = False
         self._request_id = 0
@@ -434,6 +442,17 @@ class TranslatorApp:
         self._initialize_hotkey()
         self._initialize_tray()
         self._initialize_mouse_monitor()
+        # Map and paint the complete native window into its transparent surface
+        # before revealing it. Keep that surface so showing it needs no repaint.
+        try:
+            # Startup is outside a Tk callback and recurring pollers have not
+            # started yet: drain Map/Configure events as well as idle layout.
+            self.root.update()
+            if not self._decorated:
+                self._apply_windows_rounding()
+        finally:
+            self.root.attributes("-alpha", 1.0)
+        self._discard_mouse_events()
         self._poll_results()
         self._poll_ocr_results()
         self._poll_hotkey_events()
@@ -492,8 +511,6 @@ class TranslatorApp:
             )
         self.root.geometry(f"{width}x{height}+{x}+{y}")
         self.root.protocol("WM_DELETE_WINDOW", self.hide_window)
-        if not self._decorated:
-            self.root.after(20, self._apply_windows_rounding)
 
     def _set_automation_state(self, state: str) -> None:
         """Expose non-sensitive OCR state only in decorated UI test mode."""
@@ -903,10 +920,40 @@ class TranslatorApp:
     def _resize_window(self, event: tk.Event[tk.Misc]) -> str:
         if self._resize_edge is None:
             return "break"
+        self._pending_resize_pointer = (event.x_root, event.y_root)
+        self._schedule_resize_frame()
+        return "break"
+
+    def _schedule_resize_frame(self) -> None:
+        if self._resize_after_id is None and self._resize_layout_after_id is None:
+            self._resize_after_id = self.root.after(
+                self.RESIZE_INTERVAL_MS, self._flush_resize_frame
+            )
+
+    def _flush_resize_frame(self) -> None:
+        self._resize_after_id = None
+        pointer = self._pending_resize_pointer
+        self._pending_resize_pointer = None
+        if self._resize_edge is None or pointer is None:
+            return
+        self._apply_resize_pointer(pointer)
+        # SetWindowPos queues Configure events. Let Tk process those and its
+        # child layout before accepting another frame, even during a burst of
+        # mouse motion. Never re-enter the entire event loop with update().
+        self._resize_layout_after_id = self.root.after_idle(
+            self._resize_layout_ready
+        )
+
+    def _resize_layout_ready(self) -> None:
+        self._resize_layout_after_id = None
+        if self._resize_edge is not None and self._pending_resize_pointer is not None:
+            self._schedule_resize_frame()
+
+    def _apply_resize_pointer(self, pointer: tuple[int, int]) -> None:
         x, y, width, height = resize_window_geometry(
             self._resize_edge,
             self._resize_start_pointer,
-            (event.x_root, event.y_root),
+            pointer,
             self._resize_start_geometry,
             (self.MIN_WIDTH, self.MIN_HEIGHT),
         )
@@ -919,13 +966,25 @@ class TranslatorApp:
         ):
             # Tk accepts "+-100" as an absolute negative virtual-screen coordinate.
             self.root.geometry(f"{width}x{height}+{x}+{y}")
-        return "break"
+
+    def _cancel_resize_frame(self) -> None:
+        for name in ("_resize_after_id", "_resize_layout_after_id"):
+            callback = getattr(self, name)
+            if callback is not None:
+                self.root.after_cancel(callback)
+                setattr(self, name, None)
 
     def _finish_resize(
         self, _event: tk.Event[tk.Misc] | None = None
     ) -> str:
         if self._resize_edge is None:
             return "break"
+        self._cancel_resize_frame()
+        if _event is not None:
+            self._pending_resize_pointer = (_event.x_root, _event.y_root)
+        if self._pending_resize_pointer is not None:
+            self._apply_resize_pointer(self._pending_resize_pointer)
+            self._pending_resize_pointer = None
         self._resize_edge = None
         self.root.update_idletasks()
         redraw_window(self.root.winfo_id(), immediate=True)
@@ -1178,15 +1237,56 @@ class TranslatorApp:
         self._settings_dialog = HotkeySettingsDialog(self)
 
     def hide_window(self) -> str:
+        self._cancel_resize_frame()
+        self._pending_resize_pointer = None
+        self._resize_edge = None
         self.root.withdraw()
+        self._cancel_window_presentation()
         return "break"
 
     def show_window(self) -> None:
         self._place_at_fixed_position()
-        self.root.deiconify()
-        self.root.attributes("-topmost", True)
-        self.root.lift()
+        self._present_window()
         self.root.after(40, self.source_text.focus_set)
+
+    def _present_window(self) -> None:
+        hidden = self.root.state() == "withdrawn"
+        self.root.attributes("-topmost", True)
+        if hidden:
+            self.root.attributes("-alpha", 0.0)
+            self._presentation_hidden = True
+        try:
+            self.root.deiconify()
+            self.root.lift()
+            if hidden:
+                # A restore happens inside a Tk callback. Let Map/Configure
+                # events finish normally, then reveal one fully laid-out frame.
+                self._presentation_after_id = self.root.after_idle(
+                    self._complete_window_presentation
+                )
+        except Exception:
+            self._cancel_window_presentation()
+            raise
+
+    def _complete_window_presentation(self) -> None:
+        self._presentation_after_id = None
+        try:
+            # Mapping already schedules Expose/layout work. Drain that work
+            # once; invalidating every child again would delay the reveal.
+            self.root.update_idletasks()
+        finally:
+            self._restore_window_opacity()
+
+    def _restore_window_opacity(self) -> None:
+        if self._presentation_hidden:
+            self.root.attributes("-alpha", 1.0)
+            self._presentation_hidden = False
+
+    def _cancel_window_presentation(self) -> None:
+        if self._presentation_after_id is not None:
+            self.root.after_cancel(self._presentation_after_id)
+            self._presentation_after_id = None
+        self._restore_window_opacity()
 
     def _initialize_tray(self) -> None:
         success, error = self._tray.start()
@@ -1276,9 +1376,7 @@ class TranslatorApp:
                 x, y, width, height, (left, top, right, bottom)
             )
             self._place_window(x, y)
-        self.root.deiconify()
-        self.root.attributes("-topmost", True)
-        self.root.lift()
+        self._present_window()
         self.root.after(40, self.source_text.focus_set)
 
     def _poll_hotkey_events(self) -> None:
@@ -1310,7 +1408,7 @@ class TranslatorApp:
             return
         self._set_automation_state("ocr-selecting")
         self._ocr_restore_on_cancel = self.root.state() != "withdrawn"
-        self.root.withdraw()
+        self.hide_window()
         self.root.update_idletasks()
         self._discard_mouse_events()
         self.root.after(100, self._show_ocr_selector)
@@ -1761,6 +1859,9 @@ class TranslatorApp:
 
     def exit_app(self) -> None:
         self._closed = True
+        self._cancel_window_presentation()
+        self._cancel_resize_frame()
+        self._pending_resize_pointer = None
         if self._ocr_selector is not None:
             self._ocr_selector.close()
             self._ocr_selector = None

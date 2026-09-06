@@ -87,14 +87,14 @@ def set_window_bounds(
     width: int,
     height: int,
 ) -> bool:
-    """Resize a Tk top-level quickly, then queue one complete client repaint."""
+    """Resize a Tk top-level, leaving normal damage painting to Tk/Windows."""
     if width <= 0 or height <= 0:
         return False
     user32 = _load_user32()
     if user32 is None:
         return False
     hwnd = _toplevel_handle(user32, tk_window_id)
-    resized = bool(
+    return bool(
         user32.SetWindowPos(
             hwnd,
             None,
@@ -105,14 +105,6 @@ def set_window_bounds(
             RESIZE_WINDOW_FLAGS,
         )
     )
-    if resized:
-        user32.RedrawWindow(
-            hwnd,
-            None,
-            None,
-            REDRAW_WINDOW_FLAGS,
-        )
-    return resized
 
 
 def redraw_window(tk_window_id: int, *, immediate: bool = False) -> bool:

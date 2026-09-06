@@ -35,7 +35,7 @@ class WindowsWindowTests(unittest.TestCase):
         )
 
     @patch("translator_lite.windows.window._load_user32")
-    def test_resizing_invalidates_the_full_toplevel(
+    def test_resizing_does_not_force_a_full_repaint_for_every_pointer_event(
         self, load_user32: Mock
     ) -> None:
         user32 = Mock()
@@ -55,12 +55,7 @@ class WindowsWindowTests(unittest.TestCase):
             720,
             RESIZE_WINDOW_FLAGS,
         )
-        user32.RedrawWindow.assert_called_once_with(
-            456,
-            None,
-            None,
-            REDRAW_WINDOW_FLAGS,
-        )
+        user32.RedrawWindow.assert_not_called()
 
     @patch("translator_lite.windows.window._load_user32")
     def test_immediate_redraw_paints_before_returning(

@@ -32,6 +32,8 @@ class DesktopMathTests(unittest.TestCase):
         app.provider_meta = Mock()
         app.counter_label = Mock()
         app._closed = False
+        app._presentation_after_id = None
+        app._presentation_hidden = False
         app._request_id = 3
         app._results = queue.Queue()
         app._math_results = queue.Queue()
@@ -282,6 +284,8 @@ class DesktopMathTests(unittest.TestCase):
     @patch("translator_lite.desktop.app.close_helper")
     def test_exit_stops_formula_helper_after_destroying_desktop(self, close_helper) -> None:
         app = self._app()
+        app._resize_after_id = None
+        app._resize_layout_after_id = None
         app._ocr_selector = Mock()
         app._hotkey_manager = Mock()
         app._ocr_hotkey_manager = Mock()
